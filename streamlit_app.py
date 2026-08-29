@@ -666,12 +666,21 @@ with tab4:
                 else:
                     map_df_sample = map_df
                 
+                def safe_map_text(value, default='N/A', max_len=None):
+                    if pd.isna(value):
+                        text = default
+                    else:
+                        text = str(value)
+                    if max_len is not None and len(text) > max_len:
+                        text = text[:max_len]
+                    return text
+
                 for idx, row in map_df_sample.iterrows():
                     lat = row['Chamada_atendimentos.local_latitude']
                     lon = row['Chamada_atendimentos.local_longitude']
-                    municipio = row.get('Chamada_atendimentos.local_municipio_nome', 'N/A')
-                    natureza = row.get('Chamada_atendimentos.natureza_descricao', 'N/A')
-                    local = row.get('Chamada_atendimentos.local_do_fato', 'N/A')
+                    municipio = safe_map_text(row.get('Chamada_atendimentos.local_municipio_nome', 'N/A'))
+                    natureza = safe_map_text(row.get('Chamada_atendimentos.natureza_descricao', 'N/A'))
+                    local = safe_map_text(row.get('Chamada_atendimentos.local_do_fato', 'N/A'))
                     
                     popup_text = f"""
                     <b>📍 {municipio}</b><br>
@@ -682,7 +691,7 @@ with tab4:
                     folium.Marker(
                         location=[lat, lon],
                         popup=folium.Popup(popup_text, max_width=300),
-                        tooltip=f"{municipio} - {natureza[:30]}..."
+                        tooltip=f"{municipio} - {safe_map_text(natureza, 'N/A', 30)}..."
                     ).add_to(marker_cluster)
                 
                 st_folium(m, width=1200, height=600)
