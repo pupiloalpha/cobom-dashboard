@@ -264,7 +264,7 @@ def extrair_bbm(unidade):
                 return part
     return 'Outros'
 
-def extrair_recursos_unicos(df):
+def extrair_recursos(df):
     """Retorna lista ordenada de códigos de recursos únicos a partir da coluna 'Empenhos.recurso_codigo_prefixo'."""
     if 'Empenhos.recurso_codigo_prefixo' not in df.columns:
         return []
@@ -273,6 +273,8 @@ def extrair_recursos_unicos(df):
         val_str = str(val).strip()
         if not val_str:
             continue
+        # Normaliza separadores: " / " vira ","
+        val_str = val_str.replace(' / ', ',')
         if ',' in val_str:
             for item in val_str.split(','):
                 item = item.strip()
@@ -355,7 +357,7 @@ with st.sidebar:
         classificacoes = sorted(df_filtro['Chamada_atendimentos.chamada_classificacao_descricao'].dropna().unique())
         unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique())
         # NOVO: filtro de recursos empenhados
-        recursos_unicos = extrair_recursos_unicos(df_filtro)
+        recursos_unicos = extrair_recursos(df_filtro)
         
         with st.expander("Filtros adicionais", expanded=True):
             mun_filter = st.multiselect("Município", municipios, default=[])
