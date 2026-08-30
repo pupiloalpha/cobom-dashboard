@@ -264,6 +264,24 @@ def extrair_bbm(unidade):
                 return part
     return 'Outros'
 
+def extrair_recursos_unicos(df):
+    """Retorna lista ordenada de códigos de recursos únicos a partir da coluna 'Empenhos.recurso_codigo_prefixo'."""
+    if 'Empenhos.recurso_codigo_prefixo' not in df.columns:
+        return []
+    recursos = set()
+    for val in df['Empenhos.recurso_codigo_prefixo'].dropna():
+        val_str = str(val).strip()
+        if not val_str:
+            continue
+        if ',' in val_str:
+            for item in val_str.split(','):
+                item = item.strip()
+                if item:
+                    recursos.add(item)
+        else:
+            recursos.add(val_str)
+    return sorted(recursos)
+
 # ==========================
 # SIDEBAR - UPLOAD E FILTROS
 # ==========================
@@ -276,6 +294,8 @@ with st.sidebar:
         accept_multiple_files=True
     )
     
+    rec_filter = []  # Garante que a variável exista mesmo sem arquivos
+
     if uploaded_files:
         dfs = {}
         for file in uploaded_files:
@@ -334,12 +354,15 @@ with st.sidebar:
         natureza = sorted(df_filtro['Chamada_atendimentos.natureza_descricao'].dropna().unique())
         classificacoes = sorted(df_filtro['Chamada_atendimentos.chamada_classificacao_descricao'].dropna().unique())
         unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique())
+        # NOVO: filtro de recursos empenhados
+        recursos_unicos = extrair_recursos_unicos(df_filtro)
         
         with st.expander("Filtros adicionais", expanded=True):
             mun_filter = st.multiselect("Município", municipios, default=[])
             nat_filter = st.multiselect("Natureza", natureza, default=[])
             class_filter = st.multiselect("Classificação da Chamada", classificacoes, default=[])
             uni_filter = st.multiselect("Unidade", unidades, default=[])
+            rec_filter = st.multiselect("Recursos Empenhados", recursos_unicos, default=[])
         
         df_filtered = df_filtro.copy()
         if mun_filter:
@@ -350,6 +373,14 @@ with st.sidebar:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.chamada_classificacao_descricao'].isin(class_filter)]
         if uni_filter:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.unidade_servico_nome'].isin(uni_filter)]
+        # Filtro por recursos empenhados
+        if rec_filter:
+            def has_selected_resource(val):
+                if pd.isna(val):
+                    return False
+                resources = [r.strip() for r in str(val).split(',') if r.strip()]
+                return any(r in resources for r in rec_filter)
+            df_filtered = df_filtered[df_filtered['Empenhos.recurso_codigo_prefixo'].apply(has_selected_resource)]
         
         # Armazenar em session_state para uso após a sidebar
         st.session_state.df_filtered = df_filtered
