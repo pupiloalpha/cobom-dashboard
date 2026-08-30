@@ -814,12 +814,60 @@ with tab5:
         else:
             st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
         
-        # Exibir estatísticas descritivas adicionais em tabela
-        st.subheader("Estatísticas Descritivas")
-        desc = df_tempo_filtrado['tempo_horas'].describe().reset_index()
-        desc.columns = ['Estatística', 'Horas']
-        desc['Horas'] = desc['Horas'].map(lambda x: f"{x:.2f}")
-        st.dataframe(desc, use_container_width=True)
+        # Tabela resumo por Classificação
+        st.subheader("📋 Resumo por Classificação da Chamada")
+        
+        # Agrupar por classificação
+        df_class = df_tempo_filtrado.groupby('Chamada_atendimentos.chamada_classificacao_descricao').agg(
+            media_horas=('tempo_horas', 'mean'),
+            mediana_horas=('tempo_horas', 'median'),
+            desvio_horas=('tempo_horas', 'std'),
+            contagem=('tempo_horas', 'count'),
+            maximo_horas=('tempo_horas', 'max')
+        ).reset_index()
+        
+        # Calcular percentual de atendimentos > 24h por classificação
+        acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby('Chamada_atendimentos.chamada_classificacao_descricao').size()
+        df_class['acima_24h'] = df_class['Chamada_atendimentos.chamada_classificacao_descricao'].map(acima_24h).fillna(0).astype(int)
+        df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
+        df_class['perc_acima_24h'] = df_class['perc_acima_24h'].fillna(0)
+        
+        # Filtro opcional: mínimo de registros
+        min_registros = st.number_input(
+            "Mínimo de registros por classificação para exibição",
+            min_value=1,
+            max_value=100,
+            value=5,
+            step=1,
+            key="min_reg_class"
+        )
+        df_class_filtrada = df_class[df_class['contagem'] >= min_registros].copy()
+        
+        if df_class_filtrada.empty:
+            st.info(f"Nenhuma classificação com pelo menos {min_registros} registros.")
+        else:
+            # Ordenar por média decrescente
+            df_class_filtrada = df_class_filtrada.sort_values('media_horas', ascending=False)
+            
+            # Formatação para exibição
+            tabela = df_class_filtrada.copy()
+            tabela['media_horas'] = tabela['media_horas'].map(lambda x: f"{x:.2f}")
+            tabela['mediana_horas'] = tabela['mediana_horas'].map(lambda x: f"{x:.2f}")
+            tabela['desvio_horas'] = tabela['desvio_horas'].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+            tabela['maximo_horas'] = tabela['maximo_horas'].map(lambda x: f"{x:.2f}")
+            tabela['perc_acima_24h'] = tabela['perc_acima_24h'].map(lambda x: f"{x:.1f}%")
+            
+            tabela = tabela.rename(columns={
+                'Chamada_atendimentos.chamada_classificacao_descricao': 'Classificação',
+                'media_horas': 'Média (h)',
+                'mediana_horas': 'Mediana (h)',
+                'desvio_horas': 'Desvio (h)',
+                'contagem': 'Nº Chamadas',
+                'maximo_horas': 'Máximo (h)',
+                'acima_24h': '> 24h',
+                'perc_acima_24h': '% > 24h'
+            })
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
 
 st.markdown("---")
 st.caption("Dashboard desenvolvido com Streamlit | Dados do COBOM-BH")
