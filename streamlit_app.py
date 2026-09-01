@@ -264,6 +264,27 @@ def extrair_bbm(unidade):
                 return part
     return 'Outros'
 
+
+def extrair_fracao(unidade):
+    """Retorna o nome completo da unidade com seu detalhamento de fração, sem agrupar frações iguais de unidades diferentes."""
+    if pd.isna(unidade):
+        return 'Outros'
+
+    unidade_str = str(unidade).strip()
+    if not unidade_str or unidade_str.lower() == 'nan':
+        return 'Outros'
+
+    # Remove informações em parênteses para evitar duplicidade textual
+    unidade_str = re.sub(r'\s*\([^)]*\)', '', unidade_str)
+    partes = [p.strip() for p in unidade_str.split('/') if p.strip()]
+    if not partes:
+        return 'Outros'
+
+    # Preserva o caminho completo da unidade/fração para distinguir unidades diferentes
+    # Ex.: "BBM 2 / 3ª Cia / 1ª Fra" e "BBM 3 / 3ª Cia / 1ª Fra" permanecem distintos
+    return ' / '.join(partes)
+
+
 def extrair_recursos(df):
     """Retorna lista ordenada de códigos de recursos únicos a partir da coluna 'Empenhos.recurso_codigo_prefixo'."""
     if 'Empenhos.recurso_codigo_prefixo' not in df.columns:
@@ -520,6 +541,23 @@ with tab1:
                 fig = px.bar(uni_counts, x='unidade', y='count', title='Top 15 Unidades',
                              labels={'unidade': '', 'count': 'Chamadas'}, template='plotly_white')
                 st.plotly_chart(fig, width='stretch')
+
+            fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
+            fracoes = fracoes[fracoes != 'Outros']
+            if not fracoes.empty:
+                frac_counts = fracoes.value_counts().reset_index()
+                frac_counts.columns = ['fracao', 'count']
+                frac_counts = frac_counts.head(15)
+                fig = px.bar(frac_counts, x='fracao', y='count', title='Top 15 Frações / Unidades',
+                             labels={'fracao': 'Unidade e Fração', 'count': 'Chamadas'}, template='plotly_white')
+                fig.update_layout(
+                    width=1400,
+                    height=700,
+                    xaxis={'categoryorder': 'total descending'},
+                    legend={'orientation': 'h', 'yanchor': 'bottom', 'y': 1.02, 'xanchor': 'left', 'x': 0},
+                    margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
+                )
+                st.plotly_chart(fig, use_container_width=True)
     
     col3, col4 = st.columns(2)
     with col3:
@@ -703,6 +741,23 @@ with tab3:
                 fig = px.bar(bbm_counts, x='bbm', y='chamadas', title='Chamadas por BBM / CIA IND',
                              labels={'bbm': '', 'chamadas': 'Chamadas'}, template='plotly_white')
                 st.plotly_chart(fig, width='stretch')
+
+            fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
+            fracoes = fracoes[fracoes != 'Outros']
+            if not fracoes.empty:
+                frac_counts = fracoes.value_counts().reset_index()
+                frac_counts.columns = ['fracao', 'chamadas']
+                frac_counts = frac_counts.head(15)
+                fig = px.bar(frac_counts, x='fracao', y='chamadas', title='Detalhamento por Frações / Unidades',
+                             labels={'fracao': 'Unidade e Fração', 'chamadas': 'Chamadas'}, template='plotly_white')
+                fig.update_layout(
+                    width=1400,
+                    height=700,
+                    xaxis={'categoryorder': 'total descending'},
+                    legend={'orientation': 'h', 'yanchor': 'bottom', 'y': 1.02, 'xanchor': 'left', 'x': 0},
+                    margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
 # ==========================
 # ABA 4 - MAPA
