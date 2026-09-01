@@ -432,7 +432,11 @@ class_col = coluna_ou_none(df_filtered,
     'Classificacao',
     'classificacao'
 )
-classificacao_top = df_filtered[class_col].mode()[0] if not df_filtered.empty and class_col else "N/A"
+classificacao_top = "N/A"
+if class_col and not df_filtered.empty:
+    mode_series = df_filtered[class_col].mode()
+    if not mode_series.empty:
+        classificacao_top = mode_series.iloc[0]
 
 col1, col2, col3 = st.columns(3)
 col1.metric("📞 Total de Chamadas", f"{total_chamadas:,}")
