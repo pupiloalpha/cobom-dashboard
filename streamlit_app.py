@@ -284,6 +284,14 @@ def extrair_recursos(df):
             recursos.add(val_str)
     return sorted(recursos)
 
+
+def coluna_ou_none(df, *nomes):
+    """Retorna o primeiro nome de coluna existente na lista, ou None."""
+    for nome in nomes:
+        if nome in df.columns:
+            return nome
+    return None
+
 # ==========================
 # SIDEBAR - UPLOAD E FILTROS
 # ==========================
@@ -352,13 +360,19 @@ with st.sidebar:
                 (df_filtro['chamada_data_inclusao'].dt.date <= data_fim)
             ]
         
-        municipios = sorted(df_filtro['Chamada_atendimentos.local_municipio_nome'].dropna().unique())
-        natureza = sorted(df_filtro['Chamada_atendimentos.natureza_descricao'].dropna().unique())
-        classificacoes = sorted(df_filtro['Chamada_atendimentos.chamada_classificacao_descricao'].dropna().unique())
-        unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique())
+        municipios = sorted(df_filtro['Chamada_atendimentos.local_municipio_nome'].dropna().unique()) if 'Chamada_atendimentos.local_municipio_nome' in df_filtro.columns else []
+        natureza = sorted(df_filtro['Chamada_atendimentos.natureza_descricao'].dropna().unique()) if 'Chamada_atendimentos.natureza_descricao' in df_filtro.columns else []
+        coluna_classificacao = coluna_ou_none(df_filtro,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        classificacoes = sorted(df_filtro[coluna_classificacao].dropna().unique()) if coluna_classificacao else []
+        unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique()) if 'Chamada_atendimentos.unidade_servico_nome' in df_filtro.columns else []
         # NOVO: filtro de recursos empenhados
         recursos_unicos = extrair_recursos(df_filtro)
-        
+
         with st.expander("Filtros adicionais", expanded=True):
             mun_filter = st.multiselect("Município", municipios, default=[])
             nat_filter = st.multiselect("Natureza", natureza, default=[])
@@ -371,8 +385,8 @@ with st.sidebar:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.local_municipio_nome'].isin(mun_filter)]
         if nat_filter:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.natureza_descricao'].isin(nat_filter)]
-        if class_filter:
-            df_filtered = df_filtered[df_filtered['Chamada_atendimentos.chamada_classificacao_descricao'].isin(class_filter)]
+        if class_filter and coluna_classificacao:
+            df_filtered = df_filtered[df_filtered[coluna_classificacao].isin(class_filter)]
         if uni_filter:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.unidade_servico_nome'].isin(uni_filter)]
         # Filtro por recursos empenhados
@@ -411,8 +425,14 @@ if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
 else:
     unidade_top = "N/A"
 
-natureza_top = df_filtered['Chamada_atendimentos.natureza_descricao'].mode()[0] if not df_filtered.empty else "N/A"
-classificacao_top = df_filtered['Chamada_atendimentos.chamada_classificacao_descricao'].mode()[0] if not df_filtered.empty else "N/A"
+natureza_top = df_filtered['Chamada_atendimentos.natureza_descricao'].mode()[0] if not df_filtered.empty and 'Chamada_atendimentos.natureza_descricao' in df_filtered.columns else "N/A"
+class_col = coluna_ou_none(df_filtered,
+    'Chamada_atendimentos.chamada_classificacao_descricao',
+    'chamada_classificacao_descricao',
+    'Classificacao',
+    'classificacao'
+)
+classificacao_top = df_filtered[class_col].mode()[0] if not df_filtered.empty and class_col else "N/A"
 
 col1, col2, col3 = st.columns(3)
 col1.metric("📞 Total de Chamadas", f"{total_chamadas:,}")
@@ -519,12 +539,19 @@ with tab1:
                     st.plotly_chart(fig, width='stretch')
     
     with col4:
-        class_counts = df_filtered['Chamada_atendimentos.chamada_classificacao_descricao'].value_counts().reset_index()
-        class_counts.columns = ['classificacao', 'count']
-        class_counts = class_counts.head(10)
-        fig = px.bar(class_counts, x='classificacao', y='count', title='Top 10 Classificações',
-                     labels={'classificacao': '', 'count': 'Chamadas'}, template='plotly_white')
-        st.plotly_chart(fig, width='stretch')
+        class_col = coluna_ou_none(df_filtered,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            class_counts = df_filtered[class_col].value_counts().reset_index()
+            class_counts.columns = ['classificacao', 'count']
+            class_counts = class_counts.head(10)
+            fig = px.bar(class_counts, x='classificacao', y='count', title='Top 10 Classificações',
+                         labels={'classificacao': '', 'count': 'Chamadas'}, template='plotly_white')
+            st.plotly_chart(fig, width='stretch')
 
 # ==========================
 # ABA 2 - EVOLUÇÃO
@@ -644,11 +671,18 @@ with tab3:
     col3, col4 = st.columns(2)
     
     with col3:
-        class_counts = df_filtered['Chamada_atendimentos.chamada_classificacao_descricao'].value_counts().reset_index()
-        class_counts.columns = ['classificacao', 'count']
-        fig = px.pie(class_counts, names='classificacao', values='count',
-                     title='Distribuição por Classificação', template='plotly_white')
-        st.plotly_chart(fig, width='stretch')
+        class_col = coluna_ou_none(df_filtered,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            class_counts = df_filtered[class_col].value_counts().reset_index()
+            class_counts.columns = ['classificacao', 'count']
+            fig = px.pie(class_counts, names='classificacao', values='count',
+                         title='Distribuição por Classificação', template='plotly_white')
+            st.plotly_chart(fig, width='stretch')
     
     with col4:
         if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
@@ -817,20 +851,29 @@ with tab5:
         # Tabela resumo por Classificação
         st.subheader("📋 Resumo por Classificação da Chamada")
         
-        # Agrupar por classificação
-        df_class = df_tempo_filtrado.groupby('Chamada_atendimentos.chamada_classificacao_descricao').agg(
-            media_horas=('tempo_horas', 'mean'),
-            mediana_horas=('tempo_horas', 'median'),
-            desvio_horas=('tempo_horas', 'std'),
-            contagem=('tempo_horas', 'count'),
-            maximo_horas=('tempo_horas', 'max')
-        ).reset_index()
-        
-        # Calcular percentual de atendimentos > 24h por classificação
-        acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby('Chamada_atendimentos.chamada_classificacao_descricao').size()
-        df_class['acima_24h'] = df_class['Chamada_atendimentos.chamada_classificacao_descricao'].map(acima_24h).fillna(0).astype(int)
-        df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
-        df_class['perc_acima_24h'] = df_class['perc_acima_24h'].fillna(0)
+        class_col = coluna_ou_none(df_tempo_filtrado,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            # Agrupar por classificação
+            df_class = df_tempo_filtrado.groupby(class_col).agg(
+                media_horas=('tempo_horas', 'mean'),
+                mediana_horas=('tempo_horas', 'median'),
+                desvio_horas=('tempo_horas', 'std'),
+                contagem=('tempo_horas', 'count'),
+                maximo_horas=('tempo_horas', 'max')
+            ).reset_index()
+            
+            # Calcular percentual de atendimentos > 24h por classificação
+            acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby(class_col).size()
+            df_class['acima_24h'] = df_class[class_col].map(acima_24h).fillna(0).astype(int)
+            df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
+            df_class['perc_acima_24h'] = df_class['perc_acima_24h'].fillna(0)
+        else:
+            df_class = pd.DataFrame(columns=['classificacao', 'media_horas', 'mediana_horas', 'desvio_horas', 'contagem', 'maximo_horas', 'acima_24h', 'perc_acima_24h'])
         
         # Filtro opcional: mínimo de registros
         min_registros = st.number_input(
@@ -857,8 +900,7 @@ with tab5:
             tabela['maximo_horas'] = tabela['maximo_horas'].map(lambda x: f"{x:.2f}")
             tabela['perc_acima_24h'] = tabela['perc_acima_24h'].map(lambda x: f"{x:.1f}%")
             
-            tabela = tabela.rename(columns={
-                'Chamada_atendimentos.chamada_classificacao_descricao': 'Classificação',
+            rename_map = {
                 'media_horas': 'Média (h)',
                 'mediana_horas': 'Mediana (h)',
                 'desvio_horas': 'Desvio (h)',
@@ -866,7 +908,10 @@ with tab5:
                 'maximo_horas': 'Máximo (h)',
                 'acima_24h': '> 24h',
                 'perc_acima_24h': '% > 24h'
-            })
+            }
+            if class_col:
+                rename_map[class_col] = 'Classificação'
+            tabela = tabela.rename(columns=rename_map)
             st.dataframe(tabela, use_container_width=True, hide_index=True)
 
 st.markdown("---")
