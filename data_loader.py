@@ -7,9 +7,8 @@ import chardet
 import numpy as np
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
 
-from utils.helpers import COLUMN_MAPPING, normalize_column_names, parse_coordinate, parse_datetime_series
+from utils.helpers import normalize_column_names, parse_coordinate, parse_datetime_series
 
 XLSX_COLUMNS = [
     "chamada_numero", "reds", "data_hora_criacao", "hora_criacao",
@@ -56,81 +55,14 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
-    """Le a aba COBOM e identifica o cabecalho pelos nomes conhecidos."""
+    """Le a aba BD_Cobom como no formato original do dashboard."""
     try:
-        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        worksheet = next(
-            (sheet for sheet in workbook.worksheets if sheet.title.strip().lower() == "bd_cobom"),
-            None,
-        )
-        if worksheet is None:
-            worksheet = next(
-                (sheet for sheet in workbook.worksheets if sheet.max_row and sheet.max_column),
-                None,
-            )
-        if worksheet is None:
-            return pd.DataFrame()
-
-        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
-        known_headers = set(COLUMN_MAPPING) | set(XLSX_COLUMNS) | {
-            "Reds.reds_numero",
-            "chamada_data_inclusao",
-            "chamada_hora_inclusao",
-        }
-        header_index = max(
-            range(len(rows)),
-            key=lambda index: sum(
-                str(value).strip() in known_headers
-                for value in rows[index]
-                if value is not None
-            ),
-            default=0,
-        )
-        header_score = sum(
-            str(value).strip() in known_headers
-            for value in rows[header_index]
-            if value is not None
-        )
-        width = max((len(row) for row in rows), default=0)
-        rows = [row + [None] * (width - len(row)) for row in rows]
-
-        if header_score:
-            header = [
-                str(value).strip() if value is not None and str(value).strip() else f"coluna_{index + 1}"
-                for index, value in enumerate(rows[header_index])
-            ]
-            return pd.DataFrame(rows[header_index + 1:], columns=header)
-
-        # Fallback for exports whose header names are absent or changed.
-        candidates = []
-        for worksheet in workbook.worksheets:
-            if not worksheet.max_row or not worksheet.max_column:
-                continue
-            rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
-            first_data_index = next(
-                (index for index, row in enumerate(rows) if any(value is not None for value in row)),
-                None,
-            )
-            if first_data_index is not None:
-                header_index = max(
-                    range(len(rows)),
-                    key=lambda index: (
-                        sum(value is not None for value in rows[index]),
-                        -index,
-                    ),
-                    default=first_data_index,
-                )
-                header_score = sum(value is not None for value in rows[header_index])
-                candidates.append((header_score, worksheet, rows, header_index))
-
-        if not candidates:
-            return pd.DataFrame()
-
-        _, _, rows, header_index = max(candidates, key=lambda item: item[0])
-        width = max((len(row) for row in rows), default=0)
-        rows = [row + [None] * (width - len(row)) for row in rows]
-        data = rows[header_index + 1:]
-        return pd.DataFrame(data).reindex(columns=range(len(XLSX_COLUMNS))).set_axis(XLSX_COLUMNS, axis=1)
+        try:
+            return pd.read_excel(io.BytesIO(raw), sheet_name="BD_Cobom")
+        except ValueError as error:
+            if "worksheet named 'BD_Cobom'" not in str(error):
+                raise
+            return pd.read_excel(io.BytesIO(raw), sheet_name=0)
     except Exception as error:
         raise ValueError(f"Excel nao pode ser lido: {error}") from error
 
