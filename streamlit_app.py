@@ -8,7 +8,6 @@ from sklearn.linear_model import LinearRegression
 import io
 import re
 import csv
-import chardet
 
 # Configuração da página
 st.set_page_config(page_title="Dashboard COBOM-BH", layout="wide")
@@ -42,23 +41,26 @@ st.markdown("Análise de chamadas do Corpo de Bombeiros Militar de Minas Gerais 
 # ==========================
 
 def detect_encoding(file):
-    """Detecta o encoding do arquivo usando chardet."""
+    """Detecta o encoding do arquivo usando apenas a biblioteca padrão."""
     file.seek(0)
     raw_data = file.read(10000)
     file.seek(0)
     
     if not raw_data:
         return 'utf-8'
-    
-    try:
-        result = chardet.detect(raw_data)
-        encoding = result['encoding'] if result['encoding'] else 'utf-8'
-        # Ajusta encodings comuns
-        if encoding.lower() == 'ascii':
-            return 'utf-8'
-        return encoding
-    except:
-        return 'utf-8'
+
+    if raw_data.startswith(b'\xef\xbb\xbf'):
+        return 'utf-8-sig'
+    if raw_data.startswith((b'\xff\xfe', b'\xfe\xff')):
+        return 'utf-16'
+
+    for encoding in ('utf-8', 'cp1252', 'latin-1'):
+        try:
+            raw_data.decode(encoding)
+            return encoding
+        except UnicodeDecodeError:
+            continue
+    return 'latin-1'
 
 def detect_csv_header(file):
     """Retorna o índice da linha que contém o cabeçalho."""
