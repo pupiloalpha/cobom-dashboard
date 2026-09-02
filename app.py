@@ -110,7 +110,9 @@ st.divider()
 if "data_hora_fim" not in df_filtered:
     df_filtered["data_hora_fim"] = pd.NaT
 df_filtered["tempo_minutos"] = (df_filtered["data_hora_fim"] - df_filtered["data_hora"]).dt.total_seconds() / 60
-df_filtered = df_filtered[df_filtered["tempo_minutos"] >= 0].copy()
+df_filtered = df_filtered[
+    df_filtered["tempo_minutos"].isna() | df_filtered["tempo_minutos"].ge(0)
+].copy()
 df_filtered["tempo_horas"] = df_filtered["tempo_minutos"] / 60
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Rankings de Dados", "📈 Evolução e Projeção Temporal", "📊 Distribuição e Comparação", "🗺️ Mapa de Ocorrências", "⏱️ Tempo de Atendimento"])

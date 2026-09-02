@@ -56,9 +56,52 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
-    """Le o XLSX fixo por posicao, independentemente dos nomes dos cabecalhos."""
+    """Le a aba COBOM e identifica o cabecalho pelos nomes conhecidos."""
     try:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        worksheet = next(
+            (sheet for sheet in workbook.worksheets if sheet.title.strip().lower() == "bd_cobom"),
+            None,
+        )
+        if worksheet is None:
+            worksheet = next(
+                (sheet for sheet in workbook.worksheets if sheet.max_row and sheet.max_column),
+                None,
+            )
+        if worksheet is None:
+            return pd.DataFrame()
+
+        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        known_headers = set(COLUMN_MAPPING) | set(XLSX_COLUMNS) | {
+            "Reds.reds_numero",
+            "chamada_data_inclusao",
+            "chamada_hora_inclusao",
+        }
+        header_index = max(
+            range(len(rows)),
+            key=lambda index: sum(
+                str(value).strip() in known_headers
+                for value in rows[index]
+                if value is not None
+            ),
+            default=0,
+        )
+        header_score = sum(
+            str(value).strip() in known_headers
+            for value in rows[header_index]
+            if value is not None
+        )
+        width = max((len(row) for row in rows), default=0)
+        rows = [row + [None] * (width - len(row)) for row in rows]
+
+        if header_score:
+            header = [
+                str(value).strip() if value is not None and str(value).strip() else f"coluna_{index + 1}"
+                for index, value in enumerate(rows[header_index])
+            ]
+            return pd.DataFrame(rows[header_index + 1:], columns=header)
+
+        # Fallback for exports whose header names are absent or changed.
         candidates = []
         for worksheet in workbook.worksheets:
             if not worksheet.max_row or not worksheet.max_column:
@@ -126,13 +169,22 @@ def _normalize_fixed_schema(df: pd.DataFrame, fixed_columns: list[str]) -> pd.Da
 
 def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
     text = series.astype("string").str.strip()
-    has_decimal = text.str.contains(r"[.,]", regex=True, na=False)
     numeric = pd.to_numeric(text.str.replace(",", ".", regex=False), errors="coerce").astype("float64")
-    unformatted = numeric.abs().gt(max_abs) & ~has_decimal
-    if unformatted.any():
-        numeric.loc[unformatted] = numeric.loc[unformatted].map(
-            lambda value: value / 10 ** (len(str(abs(int(value)))) - 2)
-        )
+
+    # Alguns exports removem o separador decimal e variam a quantidade de casas.
+    # Testa escalas decimais ate encontrar a primeira coordenada plausivel.
+    integer_like = numeric.notna() & numeric.mod(1).eq(0)
+    unformatted = numeric.abs().gt(max_abs) & (
+        ~text.str.contains(r"[.,]", regex=True, na=False) | integer_like
+    )
+    for index in numeric.index[unformatted]:
+        value = numeric.at[index]
+        for scale in range(1, 10):
+            candidate = value / 10 ** scale
+            if abs(candidate) <= max_abs:
+                numeric.at[index] = candidate
+                break
+
     fallback = numeric.isna() & series.notna()
     if fallback.any():
         numeric.loc[fallback] = series.loc[fallback].map(
