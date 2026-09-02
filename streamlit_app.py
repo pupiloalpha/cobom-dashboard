@@ -47,11 +47,13 @@ def parse_coordinate(valor):
     try:
         valor_str = str(valor).strip().replace(' ', '')
         
+        # Tenta converter diretamente
         try:
             return float(valor_str)
         except:
             pass
         
+        # Converte formato brasileiro (ex: -199.534.999)
         if '.' in valor_str and valor_str.count('.') > 1:
             partes = valor_str.split('.')
             
@@ -72,6 +74,7 @@ def parse_coordinate(valor):
                 except:
                     pass
         
+        # Tenta com vírgula como separador decimal
         try:
             return float(valor_str.replace(',', '.'))
         except:
@@ -100,132 +103,256 @@ def extract_municipio(local):
 @st.cache_data
 def load_data(uploaded_file):
     """Carrega e processa o arquivo de dados"""
-    file_name = uploaded_file.name.lower()
     
-    encodings = ['latin-1', 'utf-8', 'utf-8-sig']
+    # Definição dos nomes padronizados das colunas
+    COLUNAS_PADRONIZADAS = {
+        'Nº chamada': 'chamada_numero',
+        'Nş chamada': 'chamada_numero',
+        'N° chamada': 'chamada_numero',
+        'Número chamada': 'chamada_numero',
+        
+        'Nº REDS': 'reds',
+        'Nş REDS': 'reds',
+        'N° REDS': 'reds',
+        
+        'Data/hora de criação': 'data_hora_criacao',
+        'Data/hora de criaçăo': 'data_hora_criacao',
+        'Data/hora criacao': 'data_hora_criacao',
+        
+        'Local do fato': 'Chamada_atendimentos.local_do_fato',
+        
+        'Latitude  do local': 'Chamada_atendimentos.local_latitude',
+        'Latitude do local': 'Chamada_atendimentos.local_latitude',
+        
+        'Longitude do local': 'Chamada_atendimentos.local_longitude',
+        
+        'Natureza': 'Chamada_atendimentos.natureza_descricao',
+        
+        'Unidade Responsável': 'Chamada_atendimentos.unidade_servico_nome',
+        'Unidade Responsavel': 'Chamada_atendimentos.unidade_servico_nome',
+        
+        'Recursos empenhados': 'Empenhos.recurso_codigo_prefixo',
+        
+        'Alerta': 'alerta',
+        'Destaque': 'destaque',
+        'Envolve autoridade': 'envolve_autoridade',
+        
+        'Tipo de classificação': 'Chamada_atendimentos.chamada_classificacao_descricao',
+        'Tipo de classificaçăo': 'Chamada_atendimentos.chamada_classificacao_descricao',
+        'Classificacao': 'Chamada_atendimentos.chamada_classificacao_descricao',
+        'classificacao': 'Chamada_atendimentos.chamada_classificacao_descricao',
+        
+        'Situação': 'situacao',
+        'Situaçăo': 'situacao',
+        
+        'Data/hora da situação atual': 'data_hora_situacao_atual',
+        'Data/hora da situaçăo atual': 'data_hora_situacao_atual',
+        
+        'Evento associado': 'evento_associado'
+    }
+    
+    # Lista de colunas obrigatórias
+    COLUNAS_OBRIGATORIAS = [
+        'chamada_numero',
+        'data_hora_criacao',
+        'Chamada_atendimentos.local_do_fato'
+    ]
+    
+    # Lista de encodings para tentar
+    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
+    
+    # Lista de separadores para tentar
+    separadores = [';', ',', '\t', '|']
+    
     df = None
     
+    # Tenta diferentes combinações de encoding e separador
     for encoding in encodings:
+        for sep in separadores:
+            try:
+                uploaded_file.seek(0)
+                
+                # Lê o arquivo
+                df_temp = pd.read_csv(
+                    uploaded_file, 
+                    sep=sep, 
+                    encoding=encoding, 
+                    dtype=str,
+                    on_bad_lines='warn',
+                    engine='python'
+                )
+                
+                # Limpa nomes das colunas
+                df_temp.columns = df_temp.columns.str.strip()
+                
+                # Verifica se alguma coluna conhecida está presente
+                colunas_encontradas = set(df_temp.columns)
+                colunas_conhecidas = set(COLUNAS_PADRONIZADAS.keys())
+                
+                if colunas_encontradas.intersection(colunas_conhecidas):
+                    df = df_temp
+                    st.info(f"✅ Arquivo lido com encoding: {encoding}, separador: '{sep}'")
+                    break
+                    
+            except Exception as e:
+                continue
+        
+        if df is not None:
+            break
+    
+    # Se não conseguiu ler, tenta uma abordagem mais flexível
+    if df is None:
         try:
             uploaded_file.seek(0)
-            first_line = uploaded_file.readline().decode(encoding, errors='ignore').strip()
-            uploaded_file.seek(0)
+            # Tenta ler todas as linhas como texto e detectar separador
+            conteudo = uploaded_file.read().decode('utf-8', errors='ignore')
+            linhas = conteudo.split('\n')
             
-            if 'Nş chamada' in first_line or 'N° chamada' in first_line or 'Número chamada' in first_line:
-                try:
-                    df = pd.read_csv(uploaded_file, sep=';', encoding=encoding, dtype=str, on_bad_lines='skip')
-                    if df.shape[1] >= 16:
+            if len(linhas) > 1:
+                # Detecta separador pela primeira linha
+                primeira_linha = linhas[0]
+                for sep in [';', '\t', '|', ',']:
+                    if sep in primeira_linha:
+                        uploaded_file.seek(0)
+                        df = pd.read_csv(
+                            uploaded_file, 
+                            sep=sep, 
+                            encoding='utf-8',
+                            dtype=str,
+                            on_bad_lines='skip',
+                            engine='python'
+                        )
                         break
-                except:
-                    continue
-            elif '|' in first_line:
-                try:
-                    df = pd.read_csv(uploaded_file, sep='|', encoding=encoding, dtype=str, on_bad_lines='skip')
-                    if 'chamada_data_inclusao' in df.columns or df.shape[1] >= 10:
-                        break
-                except:
-                    continue
         except:
-            continue
+            pass
     
     if df is None:
         st.error("❌ Não foi possível ler o arquivo. Verifique o formato.")
         return None
     
+    # Limpa nomes das colunas novamente
     df.columns = df.columns.str.strip()
     
-    if df.shape[1] >= 16:
-        col_map = {
-            0: 'chamada_numero',
-            1: 'reds',
-            2: 'data_hora_criacao',
-            3: 'Chamada_atendimentos.local_do_fato',
-            4: 'Chamada_atendimentos.local_latitude',
-            5: 'Chamada_atendimentos.local_longitude',
-            6: 'Chamada_atendimentos.natureza_descricao',
-            7: 'Chamada_atendimentos.unidade_servico_nome',
-            8: 'Empenhos.recurso_codigo_prefixo',
-            9: 'alerta',
-            10: 'destaque',
-            11: 'envolve_autoridade',
-            12: 'Chamada_atendimentos.chamada_classificacao_descricao',
-            13: 'situacao',
-            14: 'data_hora_situacao_atual',
-            15: 'evento_associado'
-        }
+    # Cria dicionário de mapeamento baseado nas colunas encontradas
+    rename_dict = {}
+    colunas_originais = list(df.columns)
+    
+    for col_original in colunas_originais:
+        col_limpa = col_original.strip()
+        for nome_original, nome_padronizado in COLUNAS_PADRONIZADAS.items():
+            if col_limpa == nome_original or col_limpa.lower() == nome_original.lower():
+                rename_dict[col_original] = nome_padronizado
+                break
+    
+    # Aplica renomeação
+    if rename_dict:
+        df = df.rename(columns=rename_dict)
+    
+    # Verifica se temos as colunas obrigatórias
+    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in df.columns]
+    if colunas_faltando:
+        st.warning(f"⚠️ Colunas não encontradas: {colunas_faltando}")
+        st.warning(f"Colunas disponíveis: {list(df.columns)}")
         
-        col_names = list(df.columns)
-        for i, new_name in col_map.items():
-            if i < len(col_names):
-                col_names[i] = new_name
-        df.columns = col_names
-        df = df[list(col_map.values())]
-        
-        st.info("📄 Formato CSV novo detectado (separador ;).")
-        
+        # Tenta encontrar colunas similares
+        for col in colunas_faltando:
+            for col_existente in df.columns:
+                if col.lower() in col_existente.lower() or col_existente.lower() in col.lower():
+                    df[col] = df[col_existente]
+                    st.info(f"✅ Mapeamento automático: '{col_existente}' → '{col}'")
+                    break
+    
+    # Verifica novamente após mapeamento automático
+    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in df.columns]
+    if colunas_faltando:
+        st.error(f"❌ Colunas obrigatórias não encontradas: {colunas_faltando}")
+        st.error("Verifique se o arquivo está no formato correto.")
+        return None
+    
+    # Adiciona coluna de município
+    if 'Chamada_atendimentos.local_do_fato' in df.columns:
         df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
+    
+    # Função de parsing de data
+    def parse_dt(dt_str):
+        if pd.isna(dt_str):
+            return pd.NaT
         
-        def parse_dt(dt_str):
-            if pd.isna(dt_str):
-                return pd.NaT
-            dt_str = str(dt_str).strip()
-            formatos = ['%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M']
-            for fmt in formatos:
-                try:
-                    return pd.to_datetime(dt_str, format=fmt)
-                except:
-                    continue
+        dt_str = str(dt_str).strip()
+        if not dt_str or dt_str.lower() in ['nan', 'null', '']:
+            return pd.NaT
+        
+        # Lista de formatos possíveis
+        formatos = [
+            '%d/%m/%Y %H:%M',
+            '%d/%m/%Y %H:%M:%S',
+            '%Y-%m-%d %H:%M:%S',
+            '%Y-%m-%d %H:%M',
+            '%d/%m/%Y',
+            '%Y-%m-%d'
+        ]
+        
+        for fmt in formatos:
             try:
-                return pd.to_datetime(dt_str)
+                return pd.to_datetime(dt_str, format=fmt)
             except:
-                return pd.NaT
+                continue
         
+        try:
+            return pd.to_datetime(dt_str)
+        except:
+            return pd.NaT
+    
+    # Processa datas
+    if 'data_hora_criacao' in df.columns:
         df['data_hora_dt'] = df['data_hora_criacao'].apply(parse_dt)
+        
+        # Remove registros com data inválida
+        df = df.dropna(subset=['data_hora_dt'])
+        
+        if df.empty:
+            st.error("❌ Nenhuma data válida encontrada no arquivo.")
+            return None
+        
         df['chamada_data_inclusao'] = df['data_hora_dt'].dt.normalize()
         df['chamada_hora_inclusao'] = df['data_hora_dt'].dt.time
         df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
         df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
         df.drop(columns=['data_hora_criacao', 'data_hora_dt'], inplace=True, errors='ignore')
-        
+    
+    if 'data_hora_situacao_atual' in df.columns:
         df['data_hora_fim_dt'] = df['data_hora_situacao_atual'].apply(parse_dt)
         df['data_hora_fim'] = df['data_hora_fim_dt']
         df.drop(columns=['data_hora_situacao_atual', 'data_hora_fim_dt'], inplace=True, errors='ignore')
-        
-        df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
-        df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
-        
-    else:
-        if 'chamada_data_inclusao' not in df.columns:
-            st.error("❌ Formato de arquivo não reconhecido.")
-            return None
-        
-        df['chamada_data_inclusao'] = pd.to_datetime(df['chamada_data_inclusao'], format='%d/%m/%Y', errors='coerce')
-        df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'], errors='coerce')
-        df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
-        
-        if 'Chamada_atendimentos.local_municipio_nome' not in df.columns:
-            df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
-        
-        if 'Chamada_atendimentos.local_latitude' in df.columns:
-            df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
-        if 'Chamada_atendimentos.local_longitude' in df.columns:
-            df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
     
+    # Processa coordenadas
+    if 'Chamada_atendimentos.local_latitude' in df.columns:
+        df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
+    if 'Chamada_atendimentos.local_longitude' in df.columns:
+        df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
+    
+    # Adiciona colunas de tempo
     if 'chamada_data_inclusao' in df.columns:
         df['ano'] = df['chamada_data_inclusao'].dt.year
         df['mes'] = df['chamada_data_inclusao'].dt.month
         df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
-        df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
-        df['hora'] = df['hora'].astype(int)
+        if 'chamada_hora_inclusao' in df.columns:
+            df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
+            df['hora'] = df['hora'].astype(int)
         df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
-    
-    df = df.dropna(subset=['chamada_data_inclusao'])
     
     if df.empty:
         st.error("❌ Nenhum dado válido encontrado no arquivo.")
         return None
     
     st.success(f"✅ Arquivo carregado com sucesso! {len(df)} registros encontrados.")
+    
+    # Mostra informações sobre as colunas encontradas
+    with st.expander("📋 Estrutura do arquivo carregado"):
+        st.write("**Colunas encontradas:**")
+        for col in df.columns:
+            st.write(f"- {col}")
+    
     return df
 
 def extrair_bbm(unidade):
