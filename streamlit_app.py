@@ -45,32 +45,26 @@ def parse_coordinate(valor):
         return np.nan
     
     try:
-        # Converte para string e remove espaços
         valor_str = str(valor).strip().replace(' ', '')
         
-        # Se já for um número float, retorna
         try:
             return float(valor_str)
         except:
             pass
         
-        # Remove pontos que separam milhares (mantém apenas o último ponto como separador decimal)
         if '.' in valor_str and valor_str.count('.') > 1:
             partes = valor_str.split('.')
             
-            # Verifica se há sinal negativo
             if partes[0].startswith('-'):
                 sinal = '-'
                 partes[0] = partes[0][1:]
             else:
                 sinal = ''
             
-            # Remove zeros à esquerda da primeira parte
             primeira = partes[0].lstrip('0')
             if not primeira:
                 primeira = '0'
             
-            # Junta tudo: sinal + primeira parte + partes intermediárias + '.' + última parte
             if len(partes) >= 3:
                 valor_convertido = sinal + primeira + ''.join(partes[1:-1]) + '.' + partes[-1]
                 try:
@@ -78,7 +72,6 @@ def parse_coordinate(valor):
                 except:
                     pass
         
-        # Tenta substituir vírgula por ponto
         try:
             return float(valor_str.replace(',', '.'))
         except:
@@ -96,9 +89,7 @@ def extract_municipio(local):
         local_str = str(local)
         partes = local_str.split(' - ')
         if len(partes) >= 2:
-            # Pega a última parte que geralmente é o município
             municipio = partes[-1].strip()
-            # Remove informações extras entre parênteses
             if '(' in municipio:
                 municipio = municipio.split('(')[0].strip()
             return municipio
@@ -111,22 +102,16 @@ def load_data(uploaded_file):
     """Carrega e processa o arquivo de dados"""
     file_name = uploaded_file.name.lower()
     
-    # Tenta ler com diferentes encodings e separadores
     encodings = ['latin-1', 'utf-8', 'utf-8-sig']
-    separadores = [';', ',', '\t', '|']
-    
     df = None
     
-    # Primeiro, tenta identificar o formato pelo cabeçalho
     for encoding in encodings:
         try:
             uploaded_file.seek(0)
             first_line = uploaded_file.readline().decode(encoding, errors='ignore').strip()
             uploaded_file.seek(0)
             
-            # Verifica se é o formato novo (com Nş chamada)
             if 'Nş chamada' in first_line or 'N° chamada' in first_line or 'Número chamada' in first_line:
-                # Formato novo - separador ; e colunas específicas
                 try:
                     df = pd.read_csv(uploaded_file, sep=';', encoding=encoding, dtype=str, on_bad_lines='skip')
                     if df.shape[1] >= 16:
@@ -134,18 +119,9 @@ def load_data(uploaded_file):
                 except:
                     continue
             elif '|' in first_line:
-                # Formato antigo - separador |
                 try:
                     df = pd.read_csv(uploaded_file, sep='|', encoding=encoding, dtype=str, on_bad_lines='skip')
                     if 'chamada_data_inclusao' in df.columns or df.shape[1] >= 10:
-                        break
-                except:
-                    continue
-            elif ',' in first_line:
-                # Tentativa com vírgula
-                try:
-                    df = pd.read_csv(uploaded_file, sep=',', encoding=encoding, dtype=str, on_bad_lines='skip')
-                    if df.shape[1] >= 10:
                         break
                 except:
                     continue
@@ -156,12 +132,9 @@ def load_data(uploaded_file):
         st.error("❌ Não foi possível ler o arquivo. Verifique o formato.")
         return None
     
-    # Limpa os nomes das colunas
     df.columns = df.columns.str.strip()
     
-    # Verifica se é o formato novo (16 colunas)
     if df.shape[1] >= 16:
-        # Mapeamento das colunas do novo formato
         col_map = {
             0: 'chamada_numero',
             1: 'reds',
@@ -181,26 +154,21 @@ def load_data(uploaded_file):
             15: 'evento_associado'
         }
         
-        # Renomeia as colunas
         col_names = list(df.columns)
         for i, new_name in col_map.items():
             if i < len(col_names):
                 col_names[i] = new_name
         df.columns = col_names
-        # Mantém apenas as colunas mapeadas
         df = df[list(col_map.values())]
         
         st.info("📄 Formato CSV novo detectado (separador ;).")
         
-        # Extrai município
         df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
         
-        # Converte data/hora de início
         def parse_dt(dt_str):
             if pd.isna(dt_str):
                 return pd.NaT
             dt_str = str(dt_str).strip()
-            # Tenta diferentes formatos
             formatos = ['%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M']
             for fmt in formatos:
                 try:
@@ -219,17 +187,14 @@ def load_data(uploaded_file):
         df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
         df.drop(columns=['data_hora_criacao', 'data_hora_dt'], inplace=True, errors='ignore')
         
-        # Converte data/hora de fim
         df['data_hora_fim_dt'] = df['data_hora_situacao_atual'].apply(parse_dt)
         df['data_hora_fim'] = df['data_hora_fim_dt']
         df.drop(columns=['data_hora_situacao_atual', 'data_hora_fim_dt'], inplace=True, errors='ignore')
         
-        # Converte coordenadas
         df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
         df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
         
     else:
-        # Formato antigo
         if 'chamada_data_inclusao' not in df.columns:
             st.error("❌ Formato de arquivo não reconhecido.")
             return None
@@ -238,17 +203,14 @@ def load_data(uploaded_file):
         df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'], errors='coerce')
         df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
         
-        # Extrai município se necessário
         if 'Chamada_atendimentos.local_municipio_nome' not in df.columns:
             df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
         
-        # Converte coordenadas
         if 'Chamada_atendimentos.local_latitude' in df.columns:
             df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
         if 'Chamada_atendimentos.local_longitude' in df.columns:
             df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
     
-    # Colunas auxiliares
     if 'chamada_data_inclusao' in df.columns:
         df['ano'] = df['chamada_data_inclusao'].dt.year
         df['mes'] = df['chamada_data_inclusao'].dt.month
@@ -257,7 +219,6 @@ def load_data(uploaded_file):
         df['hora'] = df['hora'].astype(int)
         df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
     
-    # Remove linhas sem data
     df = df.dropna(subset=['chamada_data_inclusao'])
     
     if df.empty:
@@ -447,17 +408,9 @@ if 'df_filtered' not in st.session_state:
 
 df_filtered = st.session_state.df_filtered
 
-# Verifica se há dados
 if df_filtered.empty:
     st.warning("⚠️ Nenhum dado disponível para análise. Tente carregar outro arquivo.")
     st.stop()
-
-# Debug: Mostra informações sobre os dados carregados
-with st.expander("ℹ️ Informações dos dados carregados", expanded=False):
-    st.write(f"**Total de registros:** {len(df_filtered)}")
-    st.write(f"**Colunas disponíveis:** {list(df_filtered.columns)}")
-    st.write(f"**Primeiras linhas:**")
-    st.dataframe(df_filtered.head(3))
 
 # ==========================
 # CARDS DE MÉTRICAS
@@ -710,4 +663,282 @@ with tab2:
     daily.columns = ['data', 'chamadas']
     fig = px.line(daily, x='data', y='chamadas', title='Chamadas por Dia',
                   labels={'data': 'Data', 'chamadas': 'Chamadas'}, template='plotly_white')
-    st.plotly_chart(fig, use_container_width
+    st.plotly_chart(fig, use_container_width=True)
+
+# ==========================
+# ABA 3 - DISTRIBUIÇÃO
+# ==========================
+
+with tab3:
+    st.header("📊 Distribuição e Comparação de Dados")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        hour_counts = df_filtered['hora'].value_counts().sort_index().reset_index()
+        hour_counts.columns = ['hora', 'chamadas']
+        fig = px.bar(hour_counts, x='hora', y='chamadas', title='Chamadas por Hora do Dia',
+                     labels={'hora': 'Hora', 'chamadas': 'Chamadas'}, template='plotly_white')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        dias_semana = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
+        df_filtered['dia_semana_nome'] = df_filtered['dia_semana'].map(dias_semana)
+        week_counts = df_filtered['dia_semana_nome'].value_counts().reindex(
+            ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
+        ).reset_index()
+        week_counts.columns = ['dia', 'chamadas']
+        fig = px.bar(week_counts, x='dia', y='chamadas', title='Chamadas por Dia da Semana',
+                     labels={'dia': '', 'chamadas': 'Chamadas'}, template='plotly_white')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        class_col = coluna_ou_none(df_filtered,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            class_counts = df_filtered[class_col].value_counts().reset_index()
+            class_counts.columns = ['classificacao', 'count']
+            fig = px.pie(class_counts, names='classificacao', values='count',
+                         title='Distribuição por Classificação', template='plotly_white')
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col4:
+        if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
+            df_filtered['bbm'] = df_filtered['Chamada_atendimentos.unidade_servico_nome'].apply(extrair_bbm)
+            bbm_counts = df_filtered['bbm'].value_counts().reset_index()
+            bbm_counts.columns = ['bbm', 'chamadas']
+            bbm_counts = bbm_counts[bbm_counts['bbm'] != 'Outros']
+            try:
+                bbm_counts['ordem'] = bbm_counts['bbm'].str.extract(r'(\d+)').astype(float)
+                bbm_counts = bbm_counts.sort_values('ordem')
+            except:
+                pass
+            if not bbm_counts.empty:
+                fig = px.bar(bbm_counts, x='bbm', y='chamadas', title='Chamadas por BBM / CIA IND',
+                             labels={'bbm': '', 'chamadas': 'Chamadas'}, template='plotly_white')
+                st.plotly_chart(fig, use_container_width=True)
+
+            fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
+            fracoes = fracoes[fracoes != 'Outros']
+            if not fracoes.empty:
+                frac_counts = fracoes.value_counts().reset_index()
+                frac_counts.columns = ['fracao', 'chamadas']
+                frac_counts = frac_counts.head(15)
+                fig = px.bar(frac_counts, x='fracao', y='chamadas', title='Detalhamento por Frações / Unidades',
+                             labels={'fracao': 'Unidade e Fração', 'chamadas': 'Chamadas'}, template='plotly_white')
+                fig.update_layout(
+                    xaxis={'categoryorder': 'total descending'},
+                    margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+# ==========================
+# ABA 4 - MAPA
+# ==========================
+
+with tab4:
+    st.header("🗺️ Mapa de Ocorrências")
+    
+    if 'Chamada_atendimentos.local_latitude' in df_filtered.columns and 'Chamada_atendimentos.local_longitude' in df_filtered.columns:
+        map_df = df_filtered.dropna(subset=['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude'])
+        
+        if not map_df.empty:
+            try:
+                import folium
+                from streamlit_folium import st_folium
+                from folium.plugins import MarkerCluster
+                
+                center_lat = map_df['Chamada_atendimentos.local_latitude'].mean()
+                center_lon = map_df['Chamada_atendimentos.local_longitude'].mean()
+                
+                m = folium.Map(
+                    location=[center_lat, center_lon],
+                    zoom_start=9,
+                    tiles='OpenStreetMap',
+                    control_scale=True
+                )
+                
+                marker_cluster = MarkerCluster().add_to(m)
+                
+                if len(map_df) > 5000:
+                    map_df_sample = map_df.sample(5000, random_state=42)
+                else:
+                    map_df_sample = map_df
+                
+                def safe_map_text(value, default='N/A', max_len=None):
+                    if pd.isna(value):
+                        text = default
+                    else:
+                        text = str(value)
+                    if max_len is not None and len(text) > max_len:
+                        text = text[:max_len] + '...'
+                    return text
+
+                for idx, row in map_df_sample.iterrows():
+                    lat = row['Chamada_atendimentos.local_latitude']
+                    lon = row['Chamada_atendimentos.local_longitude']
+                    municipio = safe_map_text(row.get('Chamada_atendimentos.local_municipio_nome', 'N/A'))
+                    natureza = safe_map_text(row.get('Chamada_atendimentos.natureza_descricao', 'N/A'))
+                    local = safe_map_text(row.get('Chamada_atendimentos.local_do_fato', 'N/A'))
+                    
+                    popup_text = f"""
+                    <b>📍 {municipio}</b><br>
+                    <b>Natureza:</b> {natureza}<br>
+                    <b>Local:</b> {local}
+                    """
+                    
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=folium.Popup(popup_text, max_width=300),
+                        tooltip=f"{municipio} - {safe_map_text(natureza, 'N/A', 30)}..."
+                    ).add_to(marker_cluster)
+                
+                st_folium(m, width=1200, height=600)
+                st.caption(f"📊 Mostrando {len(map_df_sample)} de {len(map_df)} ocorrências com coordenadas válidas.")
+                
+            except ImportError:
+                st.warning("⚠️ Bibliotecas 'folium' e 'streamlit-folium' não instaladas. Execute: pip install folium streamlit-folium")
+            except Exception as e:
+                st.warning(f"Não foi possível gerar o mapa: {e}")
+        else:
+            st.info("ℹ️ Nenhum dado com coordenadas disponíveis para exibir no mapa.")
+    else:
+        st.info("ℹ️ Colunas de latitude/longitude não encontradas nos dados.")
+
+# ==========================
+# ABA 5 - TEMPO DE ATENDIMENTO
+# ==========================
+
+with tab5:
+    st.header("⏱️ Tempo de Atendimento")
+    
+    df_tempo = df_filtered.dropna(subset=['data_hora_fim']).copy()
+    
+    if df_tempo.empty:
+        st.info("ℹ️ Nenhum registro com data/hora de classificação (fim) disponível para análise de tempo.")
+    else:
+        max_tempo = st.slider(
+            "Filtrar tempo máximo (horas) para análise",
+            min_value=1.0,
+            max_value=720.0,
+            value=168.0,
+            step=1.0,
+            help="Remover ocorrências com tempo acima deste limite para melhor visualização."
+        )
+        df_tempo_filtrado = df_tempo[df_tempo['tempo_horas'] <= max_tempo].copy()
+        
+        media = df_tempo_filtrado['tempo_horas'].mean()
+        mediana = df_tempo_filtrado['tempo_horas'].median()
+        maximo = df_tempo_filtrado['tempo_horas'].max()
+        total_registros = len(df_tempo_filtrado)
+        acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].shape[0]
+        perc_acima_24h = (acima_24h / total_registros * 100) if total_registros > 0 else 0
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("📊 Média (h)", f"{media:.2f}")
+        col2.metric("📊 Mediana (h)", f"{mediana:.2f}")
+        col3.metric("📈 Máximo (h)", f"{maximo:.2f}")
+        col4.metric("📋 Total de Registros", f"{total_registros:,}")
+        col5.metric("⏰ > 24h", f"{acima_24h} ({perc_acima_24h:.1f}%)")
+        
+        st.divider()
+        
+        st.subheader("Distribuição do Tempo de Atendimento (em horas)")
+        df_tempo_filtrado['categoria'] = np.where(df_tempo_filtrado['tempo_horas'] <= 24, 'Até 24h', 'Acima de 24h')
+        
+        fig1 = px.histogram(
+            df_tempo_filtrado,
+            x='tempo_horas',
+            color='categoria',
+            nbins=50,
+            title='Histograma do Tempo de Atendimento',
+            labels={'tempo_horas': 'Horas', 'count': 'Número de Chamadas'},
+            template='plotly_white',
+            barmode='stack'
+        )
+        fig1.update_layout(legend_title_text='')
+        st.plotly_chart(fig1, use_container_width=True)
+        
+        df_acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].copy()
+        if not df_acima_24h.empty:
+            df_acima_24h['dias'] = np.ceil(df_acima_24h['tempo_horas'] / 24).astype(int)
+            fig2 = px.histogram(
+                df_acima_24h,
+                x='dias',
+                nbins=20,
+                title='Distribuição dos Atendimentos com Duração > 24 horas (em dias)',
+                labels={'dias': 'Dias', 'count': 'Número de Chamadas'},
+                template='plotly_white'
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        else:
+            st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
+        
+        st.subheader("📋 Resumo por Classificação da Chamada")
+        
+        class_col = coluna_ou_none(df_tempo_filtrado,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            df_class = df_tempo_filtrado.groupby(class_col).agg(
+                media_horas=('tempo_horas', 'mean'),
+                mediana_horas=('tempo_horas', 'median'),
+                desvio_horas=('tempo_horas', 'std'),
+                contagem=('tempo_horas', 'count'),
+                maximo_horas=('tempo_horas', 'max')
+            ).reset_index()
+            
+            acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby(class_col).size()
+            df_class['acima_24h'] = df_class[class_col].map(acima_24h).fillna(0).astype(int)
+            df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
+            df_class['perc_acima_24h'] = df_class['perc_acima_24h'].fillna(0)
+        else:
+            df_class = pd.DataFrame(columns=['classificacao', 'media_horas', 'mediana_horas', 'desvio_horas', 'contagem', 'maximo_horas', 'acima_24h', 'perc_acima_24h'])
+        
+        min_registros = st.number_input(
+            "Mínimo de registros por classificação para exibição",
+            min_value=1,
+            max_value=100,
+            value=5,
+            step=1,
+            key="min_reg_class"
+        )
+        df_class_filtrada = df_class[df_class['contagem'] >= min_registros].copy()
+        
+        if df_class_filtrada.empty:
+            st.info(f"Nenhuma classificação com pelo menos {min_registros} registros.")
+        else:
+            df_class_filtrada = df_class_filtrada.sort_values('media_horas', ascending=False)
+            
+            tabela = df_class_filtrada.copy()
+            tabela['media_horas'] = tabela['media_horas'].map(lambda x: f"{x:.2f}")
+            tabela['mediana_horas'] = tabela['mediana_horas'].map(lambda x: f"{x:.2f}")
+            tabela['desvio_horas'] = tabela['desvio_horas'].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+            tabela['maximo_horas'] = tabela['maximo_horas'].map(lambda x: f"{x:.2f}")
+            tabela['perc_acima_24h'] = tabela['perc_acima_24h'].map(lambda x: f"{x:.1f}%")
+            
+            rename_map = {
+                'media_horas': 'Média (h)',
+                'mediana_horas': 'Mediana (h)',
+                'desvio_horas': 'Desvio (h)',
+                'contagem': 'Nº Chamadas',
+                'maximo_horas': 'Máximo (h)',
+                'acima_24h': '> 24h',
+                'perc_acima_24h': '% > 24h'
+            }
+            if class_col:
+                rename_map[class_col] = 'Classificação'
+            tabela = tabela.rename(columns=rename_map)
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.caption("Dashboard desenvolvido com Streamlit | Dados do COBOM-BH")
