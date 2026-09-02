@@ -39,29 +39,37 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
     """Le planilhas Excel mesmo quando o cabecalho ocupa uma linha irregular."""
     try:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        worksheet = next(
-            (sheet for sheet in workbook.worksheets if sheet.max_row and sheet.max_column),
-            None,
-        )
-        if worksheet is None:
-            return pd.DataFrame()
-
-        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
-        width = max((len(row) for row in rows), default=0)
-        rows = [row + [None] * (width - len(row)) for row in rows]
         known_headers = set(COLUMN_MAPPING) | {
             "chamada_numero",
             "Reds.reds_numero",
             "chamada_data_inclusao",
             "Chamada_atendimentos.local_do_fato",
         }
-        header_index = max(
-            range(len(rows)),
-            key=lambda index: sum(
-                str(value).strip() in known_headers for value in rows[index] if value is not None
-            ),
-            default=0,
-        )
+        candidates = []
+        for worksheet in workbook.worksheets:
+            if not worksheet.max_row or not worksheet.max_column:
+                continue
+            rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+            header_index = max(
+                range(len(rows)),
+                key=lambda index: sum(
+                    str(value).strip() in known_headers for value in rows[index] if value is not None
+                ),
+                default=0,
+            )
+            header_score = sum(
+                str(value).strip() in known_headers
+                for value in rows[header_index]
+                if value is not None
+            )
+            candidates.append((header_score, worksheet, rows, header_index))
+
+        if not candidates:
+            return pd.DataFrame()
+
+        _, _, rows, header_index = max(candidates, key=lambda item: item[0])
+        width = max((len(row) for row in rows), default=0)
+        rows = [row + [None] * (width - len(row)) for row in rows]
         header = [str(value).strip() if value is not None and str(value).strip() else f"coluna_{index + 1}"
                   for index, value in enumerate(rows[header_index])]
         data = rows[header_index + 1:]
