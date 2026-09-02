@@ -57,12 +57,33 @@ def detect_csv_header(file):
     file.seek(0)
     return 0
 
+def detect_file_format(file):
+    """Detecta se o arquivo é no formato novo (;) ou antigo (|)."""
+    file.seek(0)
+    first_line = file.readline().decode('utf-8-sig', errors='ignore').strip()
+    file.seek(0)
+    
+    # Verifica se é o novo formato (separador ;)
+    if ';' in first_line and '|' not in first_line:
+        return 'novo'
+    
+    # Verifica se é o formato antigo (separador |)
+    if '|' in first_line:
+        return 'antigo'
+    
+    # Tenta detectar pelo cabeçalho
+    if 'Nş chamada' in first_line or 'Número chamada' in first_line:
+        return 'novo'
+    
+    return 'desconhecido'
+
 @st.cache_data
 def load_data(uploaded_file):
     file_name = uploaded_file.name.lower()
+    formato = detect_file_format(uploaded_file)
     
     # ----- TENTATIVA 1: CSV separado por ";" (novo formato) -----
-    if file_name.endswith('.csv'):
+    if file_name.endswith('.csv') and formato == 'novo':
         encodings = ['utf-8-sig', 'utf-8', 'latin-1']
         for encoding in encodings:
             try:
@@ -71,6 +92,7 @@ def load_data(uploaded_file):
                                  dtype=str, on_bad_lines='skip')
                 df.columns = df.columns.str.strip()
                 
+                # Verifica se tem pelo menos as colunas mínimas do novo formato
                 if df.shape[1] >= 16:
                     col_map = {
                         0: 'chamada_numero',
@@ -95,9 +117,10 @@ def load_data(uploaded_file):
                         if i < len(col_names):
                             col_names[i] = new_name
                     df.columns = col_names
+                    # Mantém apenas as colunas mapeadas
                     df = df[list(col_map.values())]
                     
-                    #st.info("📄 Formato CSV novo detectado (separador ;).")
+                    st.info("📄 Formato CSV novo detectado (separador ;).")
                     
                     # Extrai município
                     def extract_municipio(local):
@@ -110,7 +133,11 @@ def load_data(uploaded_file):
                     df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
                     
                     # Converte data/hora de início
-                    dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+                    dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M', errors='coerce')
+                    # Se falhar, tenta com segundos
+                    if dt_series.isna().all():
+                        dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+                    
                     df['chamada_data_inclusao'] = dt_series.dt.normalize()
                     df['chamada_hora_inclusao'] = dt_series.dt.time
                     df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
@@ -118,11 +145,13 @@ def load_data(uploaded_file):
                     df.drop(columns=['data_hora_criacao'], inplace=True)
                     
                     # Converte data/hora de fim (classificação)
-                    fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+                    fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M', errors='coerce')
+                    if fim_series.isna().all():
+                        fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
                     df['data_hora_fim'] = fim_series
                     df.drop(columns=['data_hora_situacao_atual'], inplace=True)
                     
-                    # Converte coordenadas
+                    # Converte coordenadas (substitui ponto por vírgula e vice-versa)
                     for col in ['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude']:
                         df[col] = df[col].apply(
                             lambda x: float(str(x).replace(',', '.')) 
@@ -140,6 +169,7 @@ def load_data(uploaded_file):
                     df = df.dropna(subset=['chamada_data_inclusao'])
                     return df
             except Exception as e:
+                st.warning(f"Erro ao ler com encoding {encoding}: {e}")
                 continue
         
         st.warning("Não foi possível ler o arquivo com os encodings testados. Tentando formato antigo...")
@@ -149,6 +179,7 @@ def load_data(uploaded_file):
     if file_name.endswith('.csv'):
         header_line = detect_csv_header(uploaded_file)
         try:
+            uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file, sep='|', skiprows=header_line,
                              dtype=str, engine='python', encoding='latin-1')
         except Exception as e:
@@ -646,332 +677,4 @@ with tab2:
             future_periods = [d.to_period('M').strftime('%Y-%m') for d in future_dates]
             
             df_historico = monthly_full[['periodo', 'chamadas']].copy()
-            df_historico['periodo_str'] = df_historico['periodo'].dt.strftime('%Y-%m')
-            df_historico['tipo'] = 'Histórico'
-            
-            df_future = pd.DataFrame({
-                'periodo': future_dates,
-                'periodo_str': future_periods,
-                'chamadas': previsoes,
-                'tipo': 'Projeção'
-            })
-            
-            df_upper = df_future.copy()
-            df_upper['chamadas'] = df_upper['chamadas'] + desvio
-            df_upper['tipo'] = 'Limite Superior'
-            
-            df_lower = df_future.copy()
-            df_lower['chamadas'] = df_lower['chamadas'] - desvio
-            df_lower['chamadas'] = df_lower['chamadas'].clip(lower=0)
-            df_lower['tipo'] = 'Limite Inferior'
-            
-            df_completo = pd.concat([df_historico, df_future, df_upper, df_lower], ignore_index=True)
-            
-            fig = px.line(df_completo, x='periodo_str', y='chamadas', color='tipo',
-                          title='Projeção de Chamadas (próximos 6 meses) com Desvio Padrão',
-                          labels={'periodo_str': 'Mês/Ano', 'chamadas': 'Chamadas'},
-                          template='plotly_white')
-            st.plotly_chart(fig, width='stretch')
-        else:
-            st.info("ℹ️ Dados insuficientes para realizar a projeção (mínimo 2 meses com ocorrências).")
-    else:
-        st.info("ℹ️ Nenhum dado disponível após os filtros aplicados.")
-    
-    daily = df_filtered.groupby(df_filtered['chamada_data_inclusao'].dt.date).size().reset_index(name='count')
-    daily.columns = ['data', 'chamadas']
-    fig = px.line(daily, x='data', y='chamadas', title='Chamadas por Dia',
-                  labels={'data': 'Data', 'chamadas': 'Chamadas'}, template='plotly_white')
-    st.plotly_chart(fig, width='stretch')
-
-# ==========================
-# ABA 3 - DISTRIBUIÇÃO
-# ==========================
-
-with tab3:
-    st.header("📊 Distribuição e Comparação de Dados")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        hour_counts = df_filtered['hora'].value_counts().sort_index().reset_index()
-        hour_counts.columns = ['hora', 'chamadas']
-        fig = px.bar(hour_counts, x='hora', y='chamadas', title='Chamadas por Hora do Dia',
-                     labels={'hora': 'Hora', 'chamadas': 'Chamadas'}, template='plotly_white')
-        st.plotly_chart(fig, width='stretch')
-    
-    with col2:
-        dias_semana = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
-        df_filtered['dia_semana_nome'] = df_filtered['dia_semana'].map(dias_semana)
-        week_counts = df_filtered['dia_semana_nome'].value_counts().reindex(
-            ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
-        ).reset_index()
-        week_counts.columns = ['dia', 'chamadas']
-        fig = px.bar(week_counts, x='dia', y='chamadas', title='Chamadas por Dia da Semana',
-                     labels={'dia': '', 'chamadas': 'Chamadas'}, template='plotly_white')
-        st.plotly_chart(fig, width='stretch')
-    
-    col3, col4 = st.columns(2)
-    
-    with col3:
-        class_col = coluna_ou_none(df_filtered,
-            'Chamada_atendimentos.chamada_classificacao_descricao',
-            'chamada_classificacao_descricao',
-            'Classificacao',
-            'classificacao'
-        )
-        if class_col:
-            class_counts = df_filtered[class_col].value_counts().reset_index()
-            class_counts.columns = ['classificacao', 'count']
-            fig = px.pie(class_counts, names='classificacao', values='count',
-                         title='Distribuição por Classificação', template='plotly_white')
-            st.plotly_chart(fig, width='stretch')
-    
-    with col4:
-        if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
-            df_filtered['bbm'] = df_filtered['Chamada_atendimentos.unidade_servico_nome'].apply(extrair_bbm)
-            bbm_counts = df_filtered['bbm'].value_counts().reset_index()
-            bbm_counts.columns = ['bbm', 'chamadas']
-            bbm_counts = bbm_counts[bbm_counts['bbm'] != 'Outros']
-            try:
-                bbm_counts['ordem'] = bbm_counts['bbm'].str.extract(r'(\d+)').astype(float)
-                bbm_counts = bbm_counts.sort_values('ordem')
-            except:
-                pass
-            if not bbm_counts.empty:
-                fig = px.bar(bbm_counts, x='bbm', y='chamadas', title='Chamadas por BBM / CIA IND',
-                             labels={'bbm': '', 'chamadas': 'Chamadas'}, template='plotly_white')
-                st.plotly_chart(fig, width='stretch')
-
-            fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
-            fracoes = fracoes[fracoes != 'Outros']
-            if not fracoes.empty:
-                frac_counts = fracoes.value_counts().reset_index()
-                frac_counts.columns = ['fracao', 'chamadas']
-                frac_counts = frac_counts.head(15)
-                fig = px.bar(frac_counts, x='fracao', y='chamadas', title='Detalhamento por Frações / Unidades',
-                             labels={'fracao': 'Unidade e Fração', 'chamadas': 'Chamadas'}, template='plotly_white')
-                fig.update_layout(
-                    width=1400,
-                    height=700,
-                    xaxis={'categoryorder': 'total descending'},
-                    legend={'orientation': 'h', 'yanchor': 'bottom', 'y': 1.02, 'xanchor': 'left', 'x': 0},
-                    margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-# ==========================
-# ABA 4 - MAPA
-# ==========================
-
-with tab4:
-    st.header("🗺️ Mapa de Ocorrências")
-    
-    if 'Chamada_atendimentos.local_latitude' in df_filtered.columns and 'Chamada_atendimentos.local_longitude' in df_filtered.columns:
-        map_df = df_filtered.dropna(subset=['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude'])
-        
-        if not map_df.empty:
-            try:
-                import folium
-                from streamlit_folium import st_folium
-                from folium.plugins import MarkerCluster
-                
-                center_lat = map_df['Chamada_atendimentos.local_latitude'].mean()
-                center_lon = map_df['Chamada_atendimentos.local_longitude'].mean()
-                
-                m = folium.Map(
-                    location=[center_lat, center_lon],
-                    zoom_start=9,
-                    tiles='OpenStreetMap',
-                    control_scale=True
-                )
-                
-                marker_cluster = MarkerCluster().add_to(m)
-                
-                if len(map_df) > 5000:
-                    map_df_sample = map_df.sample(5000, random_state=42)
-                else:
-                    map_df_sample = map_df
-                
-                def safe_map_text(value, default='N/A', max_len=None):
-                    if pd.isna(value):
-                        text = default
-                    else:
-                        text = str(value)
-                    if max_len is not None and len(text) > max_len:
-                        text = text[:max_len]
-                    return text
-
-                for idx, row in map_df_sample.iterrows():
-                    lat = row['Chamada_atendimentos.local_latitude']
-                    lon = row['Chamada_atendimentos.local_longitude']
-                    municipio = safe_map_text(row.get('Chamada_atendimentos.local_municipio_nome', 'N/A'))
-                    natureza = safe_map_text(row.get('Chamada_atendimentos.natureza_descricao', 'N/A'))
-                    local = safe_map_text(row.get('Chamada_atendimentos.local_do_fato', 'N/A'))
-                    
-                    popup_text = f"""
-                    <b>📍 {municipio}</b><br>
-                    <b>Natureza:</b> {natureza}<br>
-                    <b>Local:</b> {local}
-                    """
-                    
-                    folium.Marker(
-                        location=[lat, lon],
-                        popup=folium.Popup(popup_text, max_width=300),
-                        tooltip=f"{municipio} - {safe_map_text(natureza, 'N/A', 30)}..."
-                    ).add_to(marker_cluster)
-                
-                st_folium(m, width=1200, height=600)
-                st.caption(f"📊 Mostrando {len(map_df_sample)} de {len(map_df)} ocorrências com coordenadas válidas.")
-                
-            except ImportError:
-                st.warning("⚠️ Bibliotecas 'folium' e 'streamlit-folium' não instaladas. Execute: pip install folium streamlit-folium")
-            except Exception as e:
-                st.warning(f"Não foi possível gerar o mapa: {e}")
-        else:
-            st.info("ℹ️ Nenhum dado com coordenadas disponíveis para exibir no mapa.")
-    else:
-        st.info("ℹ️ Colunas de latitude/longitude não encontradas nos dados.")
-
-# ==========================
-# ABA 5 - TEMPO DE ATENDIMENTO
-# ==========================
-
-with tab5:
-    st.header("⏱️ Tempo de Atendimento")
-    
-    # Filtrar registros com data_hora_fim disponível
-    df_tempo = df_filtered.dropna(subset=['data_hora_fim']).copy()
-    
-    if df_tempo.empty:
-        st.info("ℹ️ Nenhum registro com data/hora de classificação (fim) disponível para análise de tempo.")
-    else:
-        # Remover tempos negativos (já feito globalmente) e outliers extremos (opcional)
-        max_tempo = st.slider(
-            "Filtrar tempo máximo (horas) para análise",
-            min_value=1.0,
-            max_value=720.0,  # 30 dias
-            value=168.0,      # 7 dias
-            step=1.0,
-            help="Remover ocorrências com tempo acima deste limite para melhor visualização."
-        )
-        df_tempo_filtrado = df_tempo[df_tempo['tempo_horas'] <= max_tempo].copy()
-        
-        # Métricas
-        media = df_tempo_filtrado['tempo_horas'].mean()
-        mediana = df_tempo_filtrado['tempo_horas'].median()
-        maximo = df_tempo_filtrado['tempo_horas'].max()
-        total_registros = len(df_tempo_filtrado)
-        acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].shape[0]
-        perc_acima_24h = (acima_24h / total_registros * 100) if total_registros > 0 else 0
-        
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("📊 Média (h)", f"{media:.2f}")
-        col2.metric("📊 Mediana (h)", f"{mediana:.2f}")
-        col3.metric("📈 Máximo (h)", f"{maximo:.2f}")
-        col4.metric("📋 Total de Registros", f"{total_registros:,}")
-        col5.metric("⏰ > 24h", f"{acima_24h} ({perc_acima_24h:.1f}%)")
-        
-        st.divider()
-        
-        # Gráfico 1: Distribuição geral com destaque para > 24h
-        st.subheader("Distribuição do Tempo de Atendimento (em horas)")
-        # Criar uma coluna para categorizar
-        df_tempo_filtrado['categoria'] = np.where(df_tempo_filtrado['tempo_horas'] <= 24, 'Até 24h', 'Acima de 24h')
-        
-        fig1 = px.histogram(
-            df_tempo_filtrado,
-            x='tempo_horas',
-            color='categoria',
-            nbins=50,
-            title='Histograma do Tempo de Atendimento',
-            labels={'tempo_horas': 'Horas', 'count': 'Número de Chamadas'},
-            template='plotly_white',
-            barmode='stack'
-        )
-        fig1.update_layout(legend_title_text='')
-        st.plotly_chart(fig1, width='stretch')
-        
-        # Gráfico 2: Apenas > 24h (em dias)
-        df_acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].copy()
-        if not df_acima_24h.empty:
-            df_acima_24h['dias'] = np.ceil(df_acima_24h['tempo_horas'] / 24).astype(int)
-            fig2 = px.histogram(
-                df_acima_24h,
-                x='dias',
-                nbins=20,
-                title='Distribuição dos Atendimentos com Duração > 24 horas (em dias)',
-                labels={'dias': 'Dias', 'count': 'Número de Chamadas'},
-                template='plotly_white'
-            )
-            st.plotly_chart(fig2, width='stretch')
-        else:
-            st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
-        
-        # Tabela resumo por Classificação
-        st.subheader("📋 Resumo por Classificação da Chamada")
-        
-        class_col = coluna_ou_none(df_tempo_filtrado,
-            'Chamada_atendimentos.chamada_classificacao_descricao',
-            'chamada_classificacao_descricao',
-            'Classificacao',
-            'classificacao'
-        )
-        if class_col:
-            # Agrupar por classificação
-            df_class = df_tempo_filtrado.groupby(class_col).agg(
-                media_horas=('tempo_horas', 'mean'),
-                mediana_horas=('tempo_horas', 'median'),
-                desvio_horas=('tempo_horas', 'std'),
-                contagem=('tempo_horas', 'count'),
-                maximo_horas=('tempo_horas', 'max')
-            ).reset_index()
-            
-            # Calcular percentual de atendimentos > 24h por classificação
-            acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby(class_col).size()
-            df_class['acima_24h'] = df_class[class_col].map(acima_24h).fillna(0).astype(int)
-            df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
-            df_class['perc_acima_24h'] = df_class['perc_acima_24h'].fillna(0)
-        else:
-            df_class = pd.DataFrame(columns=['classificacao', 'media_horas', 'mediana_horas', 'desvio_horas', 'contagem', 'maximo_horas', 'acima_24h', 'perc_acima_24h'])
-        
-        # Filtro opcional: mínimo de registros
-        min_registros = st.number_input(
-            "Mínimo de registros por classificação para exibição",
-            min_value=1,
-            max_value=100,
-            value=5,
-            step=1,
-            key="min_reg_class"
-        )
-        df_class_filtrada = df_class[df_class['contagem'] >= min_registros].copy()
-        
-        if df_class_filtrada.empty:
-            st.info(f"Nenhuma classificação com pelo menos {min_registros} registros.")
-        else:
-            # Ordenar por média decrescente
-            df_class_filtrada = df_class_filtrada.sort_values('media_horas', ascending=False)
-            
-            # Formatação para exibição
-            tabela = df_class_filtrada.copy()
-            tabela['media_horas'] = tabela['media_horas'].map(lambda x: f"{x:.2f}")
-            tabela['mediana_horas'] = tabela['mediana_horas'].map(lambda x: f"{x:.2f}")
-            tabela['desvio_horas'] = tabela['desvio_horas'].map(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
-            tabela['maximo_horas'] = tabela['maximo_horas'].map(lambda x: f"{x:.2f}")
-            tabela['perc_acima_24h'] = tabela['perc_acima_24h'].map(lambda x: f"{x:.1f}%")
-            
-            rename_map = {
-                'media_horas': 'Média (h)',
-                'mediana_horas': 'Mediana (h)',
-                'desvio_horas': 'Desvio (h)',
-                'contagem': 'Nº Chamadas',
-                'maximo_horas': 'Máximo (h)',
-                'acima_24h': '> 24h',
-                'perc_acima_24h': '% > 24h'
-            }
-            if class_col:
-                rename_map[class_col] = 'Classificação'
-            tabela = tabela.rename(columns=rename_map)
-            st.dataframe(tabela, use_container_width=True, hide_index=True)
-
-st.markdown("---")
-st.caption("Dashboard desenvolvido com Streamlit | Dados do COBOM-BH")
+            df_historico['periodo_str'] = df_historico
