@@ -38,7 +38,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     filename = uploaded_file.name.lower().strip()
     is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
-        return _normalize_fixed_schema(_read_excel_with_openpyxl(raw), XLSX_COLUMNS)
+        return _normalize_excel_schema(_read_excel_with_openpyxl(raw))
 
     detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
@@ -133,6 +133,52 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
         return pd.DataFrame(data).reindex(columns=range(len(XLSX_COLUMNS))).set_axis(XLSX_COLUMNS, axis=1)
     except Exception as error:
         raise ValueError(f"Excel nao pode ser lido: {error}") from error
+
+
+def _normalize_excel_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Preserva cabecalhos XLSX conhecidos e usa posicoes somente no fallback."""
+    normalized = normalize_column_names(df)
+    known_columns = set(XLSX_COLUMNS) | {
+        "chamada_data_inclusao",
+        "chamada_hora_inclusao",
+        "Chamada_atendimentos.chamada_classificacao_data",
+        "Chamada_atendimentos.chamada_classificacao_hora",
+    }
+    if any(column in normalized.columns for column in known_columns):
+        return _normalize_fixed_schema_by_name(normalized)
+    return _normalize_fixed_schema(normalized, XLSX_COLUMNS)
+
+
+def _normalize_fixed_schema_by_name(df: pd.DataFrame) -> pd.DataFrame:
+    """Converte aliases do Excel sem descartar colunas reconhecidas pelo cabecalho."""
+    aliases = {
+        "Reds.reds_numero": "reds",
+        "Chamada_atendimentos.chamada_classificacao_data": "data_classificacao",
+        "Chamada_atendimentos.chamada_classificacao_hora": "hora_classificacao",
+    }
+    result = df.rename(columns={source: target for source, target in aliases.items()})
+    if "chamada_data_inclusao" in result.columns:
+        result = result.rename(columns={
+            "chamada_data_inclusao": "data_hora_criacao",
+            "chamada_hora_inclusao": "hora_criacao",
+        })
+    if "data_hora_criacao" not in result.columns and "chamada_data_inclusao" in df.columns:
+        result["data_hora_criacao"] = df["chamada_data_inclusao"]
+    if {"data_hora_criacao", "hora_criacao"}.issubset(result.columns):
+        result["data_hora_criacao"] = (
+            result["data_hora_criacao"].astype("string").str.strip()
+            + " "
+            + result["hora_criacao"].astype("string").str.strip()
+        )
+    if "data_hora_situacao_atual" not in result.columns and {
+        "data_classificacao", "hora_classificacao"
+    }.issubset(result.columns):
+        result["data_hora_situacao_atual"] = (
+            result["data_classificacao"].astype("string").str.strip()
+            + " "
+            + result["hora_classificacao"].astype("string").str.strip()
+        )
+    return result
 
 
 def _normalize_fixed_schema(df: pd.DataFrame, fixed_columns: list[str]) -> pd.DataFrame:
