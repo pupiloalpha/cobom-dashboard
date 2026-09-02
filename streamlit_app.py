@@ -8,6 +8,7 @@ from sklearn.linear_model import LinearRegression
 import io
 import re
 import csv
+import chardet
 
 # Configuração da página
 st.set_page_config(page_title="Dashboard COBOM-BH", layout="wide")
@@ -40,40 +41,80 @@ st.markdown("Análise de chamadas do Corpo de Bombeiros Militar de Minas Gerais 
 # FUNÇÕES AUXILIARES
 # ==========================
 
+def detect_encoding(file):
+    """Detecta o encoding do arquivo usando chardet."""
+    file.seek(0)
+    raw_data = file.read(10000)
+    file.seek(0)
+    
+    if not raw_data:
+        return 'utf-8'
+    
+    try:
+        result = chardet.detect(raw_data)
+        encoding = result['encoding'] if result['encoding'] else 'utf-8'
+        # Ajusta encodings comuns
+        if encoding.lower() == 'ascii':
+            return 'utf-8'
+        return encoding
+    except:
+        return 'utf-8'
+
 def detect_csv_header(file):
     """Retorna o índice da linha que contém o cabeçalho."""
     file.seek(0)
-    lines = file.readlines()
-    for i, line in enumerate(lines):
-        if not line.strip():
-            continue
-        # Verifica se a linha contém 'chamada_numero' ou 'Nº chamada' ou 'Data/hora de criação'
-        line_str = line.decode('utf-8', errors='ignore')
-        if 'chamada_numero' in line_str or 'Nº chamada' in line_str or 'Data/hora de criação' in line_str:
-            file.seek(0)
-            return i
+    # Detecta encoding primeiro
+    encoding = detect_encoding(file)
+    file.seek(0)
+    
+    try:
+        content = file.read().decode(encoding, errors='ignore')
+        file.seek(0)
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            # Verifica se a linha contém 'chamada_numero' ou 'Nº chamada' ou 'Data/hora de criação'
+            if 'chamada_numero' in line or 'Nº chamada' in line or 'Data/hora de criação' in line:
+                file.seek(0)
+                return i
+    except:
+        file.seek(0)
+        return 0
+    
     file.seek(0)
     return 0
 
 def detect_delimiter(file):
     """Detecta o separador do arquivo CSV."""
     file.seek(0)
-    sample = file.read(1024).decode('utf-8', errors='ignore')
+    # Detecta encoding
+    encoding = detect_encoding(file)
     file.seek(0)
     
-    # Verifica se é TAB
-    if '\t' in sample:
+    try:
+        content = file.read().decode(encoding, errors='ignore')
+        file.seek(0)
+        sample = content[:1024]
+        
+        # Verifica se é TAB
+        if '\t' in sample:
+            return '\t'
+        # Verifica se é ponto e vírgula
+        if ';' in sample:
+            return ';'
+        # Verifica se é vírgula
+        if ',' in sample:
+            return ','
+        # Verifica se é pipe
+        if '|' in sample:
+            return '|'
+    except:
+        file.seek(0)
         return '\t'
-    # Verifica se é ponto e vírgula
-    if ';' in sample:
-        return ';'
-    # Verifica se é vírgula
-    if ',' in sample:
-        return ','
-    # Verifica se é pipe
-    if '|' in sample:
-        return '|'
-    return '\t'  # padrão
+    
+    file.seek(0)
+    return '\t'
 
 def normalize_column_names(df):
     """Normaliza os nomes das colunas para o padrão esperado pelo sistema."""
@@ -108,13 +149,19 @@ def normalize_column_names(df):
 def load_data(uploaded_file):
     file_name = uploaded_file.name.lower()
     
-    # Tenta ler o arquivo com diferentes separadores e encodings
-    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'iso-8859-1']
+    # Detecta encoding do arquivo
+    encoding = detect_encoding(uploaded_file)
+    st.info(f"Encoding detectado: {encoding}")
     
-    # Detecta o separador
+    # Detecta separador
     delimiter = detect_delimiter(uploaded_file)
+    st.info(f"Separador detectado: '{delimiter}'")
     
-    for encoding in encodings:
+    # Lista de encodings para tentar
+    encodings_to_try = [encoding, 'latin-1', 'iso-8859-1', 'cp1252', 'utf-8', 'utf-8-sig']
+    encodings_to_try = list(dict.fromkeys(encodings_to_try))  # Remove duplicatas
+    
+    for enc in encodings_to_try:
         try:
             uploaded_file.seek(0)
             
@@ -122,14 +169,14 @@ def load_data(uploaded_file):
             df = pd.read_csv(
                 uploaded_file, 
                 sep=delimiter, 
-                encoding=encoding,
+                encoding=enc,
                 dtype=str, 
                 on_bad_lines='skip'
             )
             df.columns = df.columns.str.strip()
             
             # Se tem poucas colunas, tenta outro separador
-            if len(df.columns) < 5:
+            if len(df.columns) < 3:
                 continue
             
             # Normaliza os nomes das colunas
@@ -138,37 +185,73 @@ def load_data(uploaded_file):
             # Verifica se temos as colunas necessárias
             if 'chamada_numero' in df.columns or 'data_hora_criacao' in df.columns:
                 # Processa o DataFrame
+                st.success(f"✅ Arquivo lido com sucesso usando encoding '{enc}'")
                 return process_dataframe(df)
                 
         except Exception as e:
             continue
     
-    st.warning("Não foi possível ler o arquivo com os encodings testados. Tentando formato antigo...")
-    uploaded_file.seek(0)
-    
-    # Tentativa com formato antigo (pipe)
-    try:
-        df = pd.read_csv(uploaded_file, sep='|', encoding='latin-1', dtype=str, on_bad_lines='skip')
-        df.columns = df.columns.str.strip()
-        df = normalize_column_names(df)
-        
-        if 'chamada_data_inclusao' in df.columns:
-            return process_dataframe(df)
-    except Exception as e:
-        st.error(f"Erro ao ler arquivo: {e}")
-        st.stop()
-    
-    # Última tentativa: ler como CSV com separador TAB
+    # Última tentativa: ler com engine='python' e tratamento de erros
     try:
         uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, sep='\t', encoding='utf-8', dtype=str, on_bad_lines='skip')
+        
+        # Tenta com chardet novamente
+        encoding = detect_encoding(uploaded_file)
+        uploaded_file.seek(0)
+        
+        df = pd.read_csv(
+            uploaded_file,
+            sep=delimiter,
+            encoding=encoding,
+            dtype=str,
+            on_bad_lines='skip',
+            engine='python'
+        )
         df.columns = df.columns.str.strip()
         df = normalize_column_names(df)
         
-        if 'chamada_numero' in df.columns or 'data_hora_criacao' in df.columns:
+        if len(df.columns) >= 3 and ('chamada_numero' in df.columns or 'data_hora_criacao' in df.columns):
+            st.success(f"✅ Arquivo lido com sucesso usando engine='python'")
             return process_dataframe(df)
     except Exception as e:
-        st.error(f"Erro ao ler o arquivo: {e}")
+        st.warning(f"Erro na tentativa com engine='python': {e}")
+    
+    # Último recurso: tentar ler linha por linha
+    try:
+        uploaded_file.seek(0)
+        encoding = detect_encoding(uploaded_file)
+        uploaded_file.seek(0)
+        
+        content = uploaded_file.read().decode(encoding, errors='ignore')
+        lines = content.splitlines()
+        
+        if not lines:
+            st.error("❌ O arquivo está vazio.")
+            st.stop()
+        
+        # Encontra o cabeçalho
+        header_line = 0
+        for i, line in enumerate(lines):
+            if 'Nº chamada' in line or 'chamada_numero' in line or 'Data/hora de criação' in line:
+                header_line = i
+                break
+        
+        # Extrai os dados
+        data_lines = lines[header_line+1:]
+        header = lines[header_line]
+        
+        # Converte para DataFrame
+        df = pd.DataFrame([line.split(delimiter) for line in data_lines if line.strip()])
+        df.columns = [col.strip() for col in header.split(delimiter)]
+        df = df[df.iloc[:, 0].notna()]
+        
+        df = normalize_column_names(df)
+        
+        if len(df.columns) >= 3:
+            st.success("✅ Arquivo lido com sucesso usando leitura linha por linha")
+            return process_dataframe(df)
+    except Exception as e:
+        st.error(f"Erro na leitura linha por linha: {e}")
     
     st.error("❌ O arquivo não pôde ser processado. Verifique o formato do arquivo.")
     st.stop()
@@ -205,7 +288,7 @@ def process_dataframe(df):
         if col in df.columns:
             df[col] = df[col].apply(
                 lambda x: float(str(x).replace(',', '.').replace(' ', '')) 
-                if pd.notna(x) and str(x).strip() != '' else np.nan
+                if pd.notna(x) and str(x).strip() != '' and str(x).strip() != 'nan' else np.nan
             )
     
     # Extrai município do local
@@ -245,6 +328,8 @@ def process_dataframe(df):
     # Remove linhas sem data de inclusão
     if 'chamada_data_inclusao' in df.columns:
         df = df.dropna(subset=['chamada_data_inclusao'])
+    else:
+        st.warning("A coluna 'chamada_data_inclusao' não foi criada. Verifique os dados.")
     
     return df
 
@@ -333,7 +418,10 @@ with st.sidebar:
         for file in uploaded_files:
             try:
                 df = load_data(file)
-                dfs[file.name] = df
+                if df is not None and not df.empty:
+                    dfs[file.name] = df
+                else:
+                    st.warning(f"⚠️ O arquivo {file.name} não contém dados válidos.")
             except Exception as e:
                 st.error(f"Erro ao carregar {file.name}: {e}")
                 continue
@@ -347,7 +435,7 @@ with st.sidebar:
             ignore_index=True
         )
         
-        st.success(f"✅ {len(uploaded_files)} arquivo(s) carregado(s)!")
+        st.success(f"✅ {len(dfs)} arquivo(s) carregado(s) com sucesso!")
         
         st.header("🔍 Filtros")
         
