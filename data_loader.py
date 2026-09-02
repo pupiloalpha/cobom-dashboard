@@ -18,7 +18,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     filename = uploaded_file.name.lower().strip()
     is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
-        return normalize_column_names(_read_excel_with_openpyxl(raw))
+        return _normalize_fixed_schema(_read_excel_with_openpyxl(raw))
 
     detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
@@ -29,7 +29,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
                 io.BytesIO(raw), sep=None, engine="python", encoding=encoding,
                 dtype=str, on_bad_lines="skip",
             )
-            return normalize_column_names(df)
+            return _normalize_fixed_schema(normalize_column_names(df))
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
@@ -49,10 +49,16 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
         rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
         width = max((len(row) for row in rows), default=0)
         rows = [row + [None] * (width - len(row)) for row in rows]
+        known_headers = set(COLUMN_MAPPING) | {
+            "chamada_numero",
+            "Reds.reds_numero",
+            "chamada_data_inclusao",
+            "Chamada_atendimentos.local_do_fato",
+        }
         header_index = max(
             range(len(rows)),
             key=lambda index: sum(
-                str(value).strip() in COLUMN_MAPPING for value in rows[index] if value is not None
+                str(value).strip() in known_headers for value in rows[index] if value is not None
             ),
             default=0,
         )
@@ -64,13 +70,47 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
         raise ValueError(f"Excel nao pode ser lido: {error}") from error
 
 
+def _normalize_fixed_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Converte os campos especificos dos esquemas XLSX e CSV para o modelo comum."""
+    result = df.copy()
+    aliases = {
+        "Reds.reds_numero": "reds",
+        "chamada_data_inclusao": "data_hora_criacao",
+        "chamada_hora_inclusao": "hora_criacao",
+        "Chamada_atendimentos.chamada_classificacao_data": "data_classificacao",
+        "Chamada_atendimentos.chamada_classificacao_hora": "hora_classificacao",
+    }
+    result = result.rename(columns={source: target for source, target in aliases.items() if source in result})
+
+    if "data_hora_criacao" in result.columns and "hora_criacao" in result.columns:
+        result["data_hora_criacao"] = (
+            result["data_hora_criacao"].astype("string").str.strip()
+            + " "
+            + result["hora_criacao"].astype("string").str.strip()
+        )
+    if "data_classificacao" in result.columns and "hora_classificacao" in result.columns:
+        result["data_hora_situacao_atual"] = (
+            result["data_classificacao"].astype("string").str.strip()
+            + " "
+            + result["hora_classificacao"].astype("string").str.strip()
+        )
+
+    return result
+
+
 def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
-    numeric = pd.to_numeric(series.astype(str).str.replace(",", ".", regex=False), errors="coerce")
+    numeric = pd.to_numeric(
+        series.astype(str).str.replace(",", ".", regex=False), errors="coerce"
+    ).astype("float64")
     fallback = numeric.isna() & series.notna()
     if fallback.any():
         numeric.loc[fallback] = series.loc[fallback].map(
             lambda value: parse_coordinate(value, max_abs)
         )
+    malformed = numeric.abs().gt(max_abs)
+    while malformed.any():
+        numeric.loc[malformed] = numeric.loc[malformed] / 10
+        malformed = numeric.abs().gt(max_abs)
     return numeric.where(numeric.abs().le(max_abs))
 
 
