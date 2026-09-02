@@ -1,0 +1,1 @@
+"""Funcoes auxiliares do dashboard."""

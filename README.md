@@ -81,7 +81,11 @@ O dashboard apresenta indicadores como:
 
 ## Estrutura do projeto
 
-- `streamlit_app.py`: aplicação principal
+- `app.py`: aplicação principal e interface Streamlit
+- `data_loader.py`: leitura, cache de filtros e processamento inicial
+- `visualizations.py`: gráficos Plotly e mapa Folium
+- `utils/helpers.py`: funções puras de normalização e parsing
+- `streamlit_app.py`: entrada retrocompatível
 - `requirements.txt`: dependências do projeto
 - `pyproject.toml`: configuração do projeto e dependências
 - `run.sh`: script para execução local
@@ -99,7 +103,7 @@ O dashboard apresenta indicadores como:
 
 ```bash
 uv sync
-uv run streamlit run streamlit_app.py
+uv run streamlit run app.py
 ```
 
 ### Opção 2: com ambiente virtual
@@ -108,7 +112,7 @@ uv run streamlit run streamlit_app.py
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run streamlit_app.py
+streamlit run app.py
 ```
 
 ## Observações sobre os dados
@@ -133,7 +137,7 @@ O projeto pode ser publicado no Streamlit Community Cloud com a configuração p
 
 - repositório GitHub
 - branch principal
-- arquivo principal: `streamlit_app.py`
+- arquivo principal: `app.py`
 
 ## Licença
 
