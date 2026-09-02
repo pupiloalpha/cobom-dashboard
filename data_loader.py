@@ -7,8 +7,9 @@ import chardet
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 
-from utils.helpers import normalize_column_names, parse_coordinate, parse_datetime_series
+from utils.helpers import COLUMN_MAPPING, normalize_column_names, parse_coordinate, parse_datetime_series
 
 
 def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
@@ -17,7 +18,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     filename = uploaded_file.name.lower().strip()
     is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
-        return normalize_column_names(pd.read_excel(io.BytesIO(raw), engine="openpyxl", dtype=str))
+        return normalize_column_names(_read_excel_with_openpyxl(raw))
 
     detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
@@ -32,6 +33,35 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
+
+
+def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
+    """Le planilhas Excel mesmo quando o cabecalho ocupa uma linha irregular."""
+    try:
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        worksheet = next(
+            (sheet for sheet in workbook.worksheets if sheet.max_row and sheet.max_column),
+            None,
+        )
+        if worksheet is None:
+            return pd.DataFrame()
+
+        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        width = max((len(row) for row in rows), default=0)
+        rows = [row + [None] * (width - len(row)) for row in rows]
+        header_index = max(
+            range(len(rows)),
+            key=lambda index: sum(
+                str(value).strip() in COLUMN_MAPPING for value in rows[index] if value is not None
+            ),
+            default=0,
+        )
+        header = [str(value).strip() if value is not None and str(value).strip() else f"coluna_{index + 1}"
+                  for index, value in enumerate(rows[header_index])]
+        data = rows[header_index + 1:]
+        return pd.DataFrame(data, columns=header)
+    except Exception as error:
+        raise ValueError(f"Excel nao pode ser lido: {error}") from error
 
 
 def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
