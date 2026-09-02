@@ -148,29 +148,77 @@ def normalize_column_names(df):
     return df
 
 def parse_coordinate(value, max_abs):
-    """Converte coordenadas em formatos decimais brasileiros e exportados."""
+    """Converte coordenadas decimais, brasileiras, DMS e sem separador."""
     if pd.isna(value):
         return np.nan
 
-    value_str = str(value).strip().replace(' ', '')
+    value_str = str(value).strip().upper()
     if not value_str or value_str.lower() == 'nan':
         return np.nan
 
+    direction_match = re.search(r'([NSEW])\s*$', value_str)
+    direction = direction_match.group(1) if direction_match else ''
+    if direction_match:
+        value_str = value_str[:direction_match.start()].strip()
+    negative = value_str.startswith('-') or direction in ('S', 'W')
+    value_str = value_str.lstrip('+-').strip()
+
     try:
-        if value_str.count('.') > 1 and ',' not in value_str:
-            sign = '-' if value_str.startswith('-') else ''
-            unsigned_value = value_str.lstrip('+-')
-            groups = unsigned_value.split('.')
-            decimal_position = min(len(groups[0]), 2)
-            digits = ''.join(groups)
-            parsed = float(f'{sign}{digits[:decimal_position]}.{digits[decimal_position:]}')
+        dms_match = re.fullmatch(
+            r'(\d+(?:[.,]\d+)?)\s*[°º]\s*'
+            r'(\d+(?:[.,]\d+)?)?\s*[\'′m]?\s*'
+            r'(\d+(?:[.,]\d+)?)?\s*["″s]?',
+            value_str,
+        )
+        if not dms_match:
+            dms_match = re.fullmatch(
+                r'(\d+)\s+(\d+(?:[.,]\d+)?)(?:\s+(\d+(?:[.,]\d+)?))?',
+                value_str,
+            )
+        if dms_match and any(dms_match.groups()[1:]):
+            degrees = float(dms_match.group(1).replace(',', '.'))
+            minutes = float((dms_match.group(2) or '0').replace(',', '.'))
+            seconds = float((dms_match.group(3) or '0').replace(',', '.'))
+            if minutes >= 60 or seconds >= 60:
+                return np.nan
+            parsed = degrees + minutes / 60 + seconds / 3600
         else:
-            parsed = float(value_str.replace('.', '').replace(',', '.')
-                            if ',' in value_str
-                            else value_str)
+            compact_value = value_str.replace(' ', '')
+            if ',' in compact_value and '.' in compact_value:
+                decimal_separator = ',' if compact_value.rfind(',') > compact_value.rfind('.') else '.'
+                thousands_separator = '.' if decimal_separator == ',' else ','
+                compact_value = compact_value.replace(thousands_separator, '')
+                compact_value = compact_value.replace(decimal_separator, '.')
+                parsed = float(compact_value)
+            elif ',' in compact_value:
+                if compact_value.count(',') > 1:
+                    groups = compact_value.split(',')
+                    digits = ''.join(groups)
+                    decimal_position = len(groups[0]) if len(groups[0]) <= 2 else 2
+                    parsed = float(f'{digits[:decimal_position]}.{digits[decimal_position:]}')
+                else:
+                    parsed = float(compact_value.replace(',', '.'))
+            elif compact_value.count('.') > 1:
+                groups = compact_value.split('.')
+                digits = ''.join(groups)
+                decimal_position = len(groups[0]) if len(groups[0]) <= 2 else 2
+                parsed = float(f'{digits[:decimal_position]}.{digits[decimal_position:]}')
+            elif compact_value.count('.') == 1:
+                groups = compact_value.split('.')
+                parsed = float(compact_value)
+                if abs(parsed) > max_abs and len(groups[0]) > 2:
+                    digits = ''.join(groups)
+                    parsed = float(f'{digits[:2]}.{digits[2:]}')
+            elif compact_value.isdigit() and len(compact_value) >= 6:
+                decimal_position = 1 if len(compact_value) <= 7 else 2
+                parsed = float(f'{compact_value[:decimal_position]}.{compact_value[decimal_position:]}')
+            else:
+                parsed = float(compact_value)
     except (TypeError, ValueError):
         return np.nan
 
+    if negative:
+        parsed = -abs(parsed)
     return parsed if abs(parsed) <= max_abs else np.nan
 
 @st.cache_data
