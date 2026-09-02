@@ -76,19 +76,13 @@ def parse_coordinate(value: Any, max_abs: float) -> float:
 
 def parse_datetime_series(series: pd.Series) -> pd.Series:
     """Tenta os formatos conhecidos e depois o parser flexivel do pandas."""
-    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-    for date_format in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        missing = result.isna()
-        if missing.any():
-            result.loc[missing] = pd.to_datetime(
-                series.loc[missing], format=date_format, errors="coerce", dayfirst=True
-            )
-    missing = result.isna()
-    if missing.any():
-        result.loc[missing] = pd.to_datetime(
-            series.loc[missing], errors="coerce", dayfirst=True
-        )
-    return result
+    return pd.to_datetime(
+        series,
+        format="mixed",
+        errors="coerce",
+        dayfirst=True,
+        utc=True,
+    ).dt.tz_localize(None)
 
 
 def extract_municipio(local: Any) -> Any:
