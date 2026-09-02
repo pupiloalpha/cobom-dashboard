@@ -39,320 +39,209 @@ st.markdown("Análise de chamadas do Corpo de Bombeiros Militar de Minas Gerais 
 # FUNÇÕES AUXILIARES
 # ==========================
 
-def parse_coordinate(valor):
-    """Converte coordenada no formato -199.534.999 para -19.9534999"""
-    if pd.isna(valor) or valor == '' or valor == ' ':
-        return np.nan
-    
-    try:
-        valor_str = str(valor).strip().replace(' ', '')
-        
-        # Tenta converter diretamente
-        try:
-            return float(valor_str)
-        except:
-            pass
-        
-        # Converte formato brasileiro (ex: -199.534.999)
-        if '.' in valor_str and valor_str.count('.') > 1:
-            partes = valor_str.split('.')
-            
-            if partes[0].startswith('-'):
-                sinal = '-'
-                partes[0] = partes[0][1:]
-            else:
-                sinal = ''
-            
-            primeira = partes[0].lstrip('0')
-            if not primeira:
-                primeira = '0'
-            
-            if len(partes) >= 3:
-                valor_convertido = sinal + primeira + ''.join(partes[1:-1]) + '.' + partes[-1]
-                try:
-                    return float(valor_convertido)
-                except:
-                    pass
-        
-        # Tenta com vírgula como separador decimal
-        try:
-            return float(valor_str.replace(',', '.'))
-        except:
-            pass
-        
-        return np.nan
-    except:
-        return np.nan
-
-def extract_municipio(local):
-    """Extrai município do campo local_do_fato"""
-    if pd.isna(local):
-        return np.nan
-    try:
-        local_str = str(local)
-        partes = local_str.split(' - ')
-        if len(partes) >= 2:
-            municipio = partes[-1].strip()
-            if '(' in municipio:
-                municipio = municipio.split('(')[0].strip()
-            return municipio
-        return np.nan
-    except:
-        return np.nan
+def detect_csv_header(file):
+    """Retorna o índice da linha que contém o cabeçalho (início com 'chamada_numero')."""
+    file.seek(0)
+    lines = file.readlines()
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(b'|')]
+        if parts and parts[0] == b'chamada_numero':
+            file.seek(0)
+            return i
+    for i, line in enumerate(lines):
+        if line.count(b'|') > 10:
+            file.seek(0)
+            return i
+    file.seek(0)
+    return 0
 
 @st.cache_data
 def load_data(uploaded_file):
-    """Carrega e processa o arquivo de dados"""
+    file_name = uploaded_file.name.lower()
     
-    # Definição dos nomes padronizados das colunas
-    COLUNAS_PADRONIZADAS = {
-        'Nº chamada': 'chamada_numero',
-        'Nş chamada': 'chamada_numero',
-        'N° chamada': 'chamada_numero',
-        'Número chamada': 'chamada_numero',
-        
-        'Nº REDS': 'reds',
-        'Nş REDS': 'reds',
-        'N° REDS': 'reds',
-        
-        'Data/hora de criação': 'data_hora_criacao',
-        'Data/hora de criaçăo': 'data_hora_criacao',
-        'Data/hora criacao': 'data_hora_criacao',
-        
-        'Local do fato': 'Chamada_atendimentos.local_do_fato',
-        
-        'Latitude  do local': 'Chamada_atendimentos.local_latitude',
-        'Latitude do local': 'Chamada_atendimentos.local_latitude',
-        
-        'Longitude do local': 'Chamada_atendimentos.local_longitude',
-        
-        'Natureza': 'Chamada_atendimentos.natureza_descricao',
-        
-        'Unidade Responsável': 'Chamada_atendimentos.unidade_servico_nome',
-        'Unidade Responsavel': 'Chamada_atendimentos.unidade_servico_nome',
-        
-        'Recursos empenhados': 'Empenhos.recurso_codigo_prefixo',
-        
-        'Alerta': 'alerta',
-        'Destaque': 'destaque',
-        'Envolve autoridade': 'envolve_autoridade',
-        
-        'Tipo de classificação': 'Chamada_atendimentos.chamada_classificacao_descricao',
-        'Tipo de classificaçăo': 'Chamada_atendimentos.chamada_classificacao_descricao',
-        'Classificacao': 'Chamada_atendimentos.chamada_classificacao_descricao',
-        'classificacao': 'Chamada_atendimentos.chamada_classificacao_descricao',
-        
-        'Situação': 'situacao',
-        'Situaçăo': 'situacao',
-        
-        'Data/hora da situação atual': 'data_hora_situacao_atual',
-        'Data/hora da situaçăo atual': 'data_hora_situacao_atual',
-        
-        'Evento associado': 'evento_associado'
-    }
-    
-    # Lista de colunas obrigatórias
-    COLUNAS_OBRIGATORIAS = [
-        'chamada_numero',
-        'data_hora_criacao',
-        'Chamada_atendimentos.local_do_fato'
-    ]
-    
-    # Lista de encodings para tentar
-    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1']
-    
-    # Lista de separadores para tentar
-    separadores = [';', ',', '\t', '|']
-    
-    df = None
-    
-    # Tenta diferentes combinações de encoding e separador
-    for encoding in encodings:
-        for sep in separadores:
+    # ----- TENTATIVA 1: CSV separado por ";" (novo formato) -----
+    if file_name.endswith('.csv'):
+        encodings = ['utf-8-sig', 'utf-8', 'latin-1']
+        for encoding in encodings:
             try:
                 uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file, sep=';', encoding=encoding,
+                                 dtype=str, on_bad_lines='skip')
+                df.columns = df.columns.str.strip()
                 
-                # Lê o arquivo
-                df_temp = pd.read_csv(
-                    uploaded_file, 
-                    sep=sep, 
-                    encoding=encoding, 
-                    dtype=str,
-                    on_bad_lines='warn',
-                    engine='python'
-                )
-                
-                # Limpa nomes das colunas
-                df_temp.columns = df_temp.columns.str.strip()
-                
-                # Verifica se alguma coluna conhecida está presente
-                colunas_encontradas = set(df_temp.columns)
-                colunas_conhecidas = set(COLUNAS_PADRONIZADAS.keys())
-                
-                if colunas_encontradas.intersection(colunas_conhecidas):
-                    df = df_temp
-                    st.info(f"✅ Arquivo lido com encoding: {encoding}, separador: '{sep}'")
-                    break
+                if df.shape[1] >= 16:
+                    col_map = {
+                        0: 'chamada_numero',
+                        1: 'reds',
+                        2: 'data_hora_criacao',
+                        3: 'Chamada_atendimentos.local_do_fato',
+                        4: 'Chamada_atendimentos.local_latitude',
+                        5: 'Chamada_atendimentos.local_longitude',
+                        6: 'Chamada_atendimentos.natureza_descricao',
+                        7: 'Chamada_atendimentos.unidade_servico_nome',
+                        8: 'Empenhos.recurso_codigo_prefixo',
+                        9: 'alerta',
+                        10: 'destaque',
+                        11: 'envolve_autoridade',
+                        12: 'Chamada_atendimentos.chamada_classificacao_descricao',
+                        13: 'situacao',
+                        14: 'data_hora_situacao_atual',  # Fim do atendimento (classificação)
+                        15: 'evento_associado'
+                    }
+                    col_names = list(df.columns)
+                    for i, new_name in col_map.items():
+                        if i < len(col_names):
+                            col_names[i] = new_name
+                    df.columns = col_names
+                    df = df[list(col_map.values())]
                     
+                    #st.info("📄 Formato CSV novo detectado (separador ;).")
+                    
+                    # Extrai município
+                    def extract_municipio(local):
+                        if pd.isna(local):
+                            return np.nan
+                        partes = local.split(' - ')
+                        if len(partes) >= 2:
+                            return partes[-1].strip()
+                        return np.nan
+                    df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
+                    
+                    # Converte data/hora de início
+                    dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+                    df['chamada_data_inclusao'] = dt_series.dt.normalize()
+                    df['chamada_hora_inclusao'] = dt_series.dt.time
+                    df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
+                    df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
+                    df.drop(columns=['data_hora_criacao'], inplace=True)
+                    
+                    # Converte data/hora de fim (classificação)
+                    fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+                    df['data_hora_fim'] = fim_series
+                    df.drop(columns=['data_hora_situacao_atual'], inplace=True)
+                    
+                    # Converte coordenadas
+                    for col in ['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude']:
+                        df[col] = df[col].apply(
+                            lambda x: float(str(x).replace(',', '.')) 
+                            if pd.notna(x) and str(x).strip() != '' else np.nan
+                        )
+                    
+                    # Colunas auxiliares
+                    df['ano'] = df['chamada_data_inclusao'].dt.year
+                    df['mes'] = df['chamada_data_inclusao'].dt.month
+                    df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
+                    df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
+                    df['hora'] = df['hora'].astype(int)
+                    df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
+                    
+                    df = df.dropna(subset=['chamada_data_inclusao'])
+                    return df
             except Exception as e:
                 continue
         
-        if df is not None:
-            break
-    
-    # Se não conseguiu ler, tenta uma abordagem mais flexível
-    if df is None:
+        st.warning("Não foi possível ler o arquivo com os encodings testados. Tentando formato antigo...")
+        uploaded_file.seek(0)
+
+    # ----- TENTATIVA 2: CSV separado por "|" (formato antigo) ou Excel -----
+    if file_name.endswith('.csv'):
+        header_line = detect_csv_header(uploaded_file)
         try:
-            uploaded_file.seek(0)
-            # Tenta ler todas as linhas como texto e detectar separador
-            conteudo = uploaded_file.read().decode('utf-8', errors='ignore')
-            linhas = conteudo.split('\n')
-            
-            if len(linhas) > 1:
-                # Detecta separador pela primeira linha
-                primeira_linha = linhas[0]
-                for sep in [';', '\t', '|', ',']:
-                    if sep in primeira_linha:
-                        uploaded_file.seek(0)
-                        df = pd.read_csv(
-                            uploaded_file, 
-                            sep=sep, 
-                            encoding='utf-8',
-                            dtype=str,
-                            on_bad_lines='skip',
-                            engine='python'
-                        )
-                        break
-        except:
-            pass
-    
-    if df is None:
-        st.error("❌ Não foi possível ler o arquivo. Verifique o formato.")
-        return None
-    
-    # Limpa nomes das colunas novamente
-    df.columns = df.columns.str.strip()
-    
-    # Cria dicionário de mapeamento baseado nas colunas encontradas
-    rename_dict = {}
-    colunas_originais = list(df.columns)
-    
-    for col_original in colunas_originais:
-        col_limpa = col_original.strip()
-        for nome_original, nome_padronizado in COLUNAS_PADRONIZADAS.items():
-            if col_limpa == nome_original or col_limpa.lower() == nome_original.lower():
-                rename_dict[col_original] = nome_padronizado
-                break
-    
-    # Aplica renomeação
-    if rename_dict:
-        df = df.rename(columns=rename_dict)
-    
-    # Verifica se temos as colunas obrigatórias
-    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in df.columns]
-    if colunas_faltando:
-        st.warning(f"⚠️ Colunas não encontradas: {colunas_faltando}")
-        st.warning(f"Colunas disponíveis: {list(df.columns)}")
+            df = pd.read_csv(uploaded_file, sep='|', skiprows=header_line,
+                             dtype=str, engine='python', encoding='latin-1')
+        except Exception as e:
+            st.error(f"Erro ao ler CSV antigo: {e}")
+            st.stop()
         
-        # Tenta encontrar colunas similares
-        for col in colunas_faltando:
-            for col_existente in df.columns:
-                if col.lower() in col_existente.lower() or col_existente.lower() in col.lower():
-                    df[col] = df[col_existente]
-                    st.info(f"✅ Mapeamento automático: '{col_existente}' → '{col}'")
-                    break
+        df.columns = df.columns.str.strip()
+        if 'chamada_data_inclusao' not in df.columns:
+            uploaded_file.seek(0)
+            lines = uploaded_file.read().decode('latin-1').splitlines()
+            header_line_content = lines[header_line].strip()
+            col_names = [c.strip() for c in header_line_content.split('|')]
+            data_lines = lines[header_line+1:]
+            data_str = '\n'.join(data_lines)
+            from io import StringIO
+            df = pd.read_csv(StringIO(data_str), sep='|', names=col_names,
+                             dtype=str, engine='python', encoding='latin-1')
+            df = df[df[col_names[0]].notna()]
+    else:
+        # Excel
+        df = pd.read_excel(uploaded_file, sheet_name="BD_Cobom")
     
-    # Verifica novamente após mapeamento automático
-    colunas_faltando = [col for col in COLUNAS_OBRIGATORIAS if col not in df.columns]
-    if colunas_faltando:
-        st.error(f"❌ Colunas obrigatórias não encontradas: {colunas_faltando}")
-        st.error("Verifique se o arquivo está no formato correto.")
-        return None
+    # ----- Processamento do formato antigo -----
+    if 'chamada_data_inclusao' not in df.columns:
+        st.error("❌ O arquivo não contém a coluna 'chamada_data_inclusao' e não pôde ser processado.")
+        st.stop()
     
-    # Adiciona coluna de município
-    if 'Chamada_atendimentos.local_do_fato' in df.columns:
+    df['chamada_data_inclusao'] = pd.to_datetime(df['chamada_data_inclusao'], format='%d/%m/%Y', errors='coerce')
+    df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'], errors='coerce')
+    df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
+    
+    # Data/hora de fim (classificação) - colunas N e O
+    if 'Chamada_atendimentos.chamada_classificacao_data' in df.columns and 'Chamada_atendimentos.chamada_classificacao_hora' in df.columns:
+        df['data_hora_fim'] = pd.to_datetime(
+            df['Chamada_atendimentos.chamada_classificacao_data'].astype(str) + ' ' + 
+            df['Chamada_atendimentos.chamada_classificacao_hora'].astype(str),
+            format='%d/%m/%Y %H:%M:%S', errors='coerce'
+        )
+    else:
+        # Se não houver colunas de fim, criar como NaT
+        df['data_hora_fim'] = pd.NaT
+    
+    # Converte coordenadas
+    if 'Chamada_atendimentos.local_latitude' in df.columns:
+        def parse_coord(x):
+            if pd.isna(x):
+                return np.nan
+            if isinstance(x, (int, float)):
+                return float(x)
+            if isinstance(x, str):
+                cleaned = x.strip().replace(',', '.').replace(' ', '')
+                try:
+                    return float(cleaned)
+                except:
+                    return np.nan
+            return np.nan
+        df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coord)
+    
+    if 'Chamada_atendimentos.local_longitude' in df.columns:
+        def parse_coord_long(x):
+            if pd.isna(x):
+                return np.nan
+            if isinstance(x, (int, float)):
+                return float(x)
+            if isinstance(x, str):
+                cleaned = x.strip().replace(',', '.').replace(' ', '')
+                try:
+                    return float(cleaned)
+                except:
+                    return np.nan
+            return np.nan
+        df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coord_long)
+    
+    # Extrai município (se não existir)
+    if 'Chamada_atendimentos.local_municipio_nome' not in df.columns:
+        def extract_municipio(local):
+            if pd.isna(local):
+                return np.nan
+            partes = local.split(' - ')
+            if len(partes) >= 2:
+                return partes[-1].strip()
+            return np.nan
         df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
     
-    # Função de parsing de data
-    def parse_dt(dt_str):
-        if pd.isna(dt_str):
-            return pd.NaT
-        
-        dt_str = str(dt_str).strip()
-        if not dt_str or dt_str.lower() in ['nan', 'null', '']:
-            return pd.NaT
-        
-        # Lista de formatos possíveis
-        formatos = [
-            '%d/%m/%Y %H:%M',
-            '%d/%m/%Y %H:%M:%S',
-            '%Y-%m-%d %H:%M:%S',
-            '%Y-%m-%d %H:%M',
-            '%d/%m/%Y',
-            '%Y-%m-%d'
-        ]
-        
-        for fmt in formatos:
-            try:
-                return pd.to_datetime(dt_str, format=fmt)
-            except:
-                continue
-        
-        try:
-            return pd.to_datetime(dt_str)
-        except:
-            return pd.NaT
+    # Colunas auxiliares
+    df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
+    df['ano'] = df['chamada_data_inclusao'].dt.year
+    df['mes'] = df['chamada_data_inclusao'].dt.month
+    df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
+    df['hora'] = df['hora'].astype(int)
+    df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
     
-    # Processa datas
-    if 'data_hora_criacao' in df.columns:
-        df['data_hora_dt'] = df['data_hora_criacao'].apply(parse_dt)
-        
-        # Remove registros com data inválida
-        df = df.dropna(subset=['data_hora_dt'])
-        
-        if df.empty:
-            st.error("❌ Nenhuma data válida encontrada no arquivo.")
-            return None
-        
-        df['chamada_data_inclusao'] = df['data_hora_dt'].dt.normalize()
-        df['chamada_hora_inclusao'] = df['data_hora_dt'].dt.time
-        df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
-        df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
-        df.drop(columns=['data_hora_criacao', 'data_hora_dt'], inplace=True, errors='ignore')
-    
-    if 'data_hora_situacao_atual' in df.columns:
-        df['data_hora_fim_dt'] = df['data_hora_situacao_atual'].apply(parse_dt)
-        df['data_hora_fim'] = df['data_hora_fim_dt']
-        df.drop(columns=['data_hora_situacao_atual', 'data_hora_fim_dt'], inplace=True, errors='ignore')
-    
-    # Processa coordenadas
-    if 'Chamada_atendimentos.local_latitude' in df.columns:
-        df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coordinate)
-    if 'Chamada_atendimentos.local_longitude' in df.columns:
-        df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coordinate)
-    
-    # Adiciona colunas de tempo
-    if 'chamada_data_inclusao' in df.columns:
-        df['ano'] = df['chamada_data_inclusao'].dt.year
-        df['mes'] = df['chamada_data_inclusao'].dt.month
-        df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
-        if 'chamada_hora_inclusao' in df.columns:
-            df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
-            df['hora'] = df['hora'].astype(int)
-        df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
-    
-    if df.empty:
-        st.error("❌ Nenhum dado válido encontrado no arquivo.")
-        return None
-    
-    st.success(f"✅ Arquivo carregado com sucesso! {len(df)} registros encontrados.")
-    
-    # Mostra informações sobre as colunas encontradas
-    with st.expander("📋 Estrutura do arquivo carregado"):
-        st.write("**Colunas encontradas:**")
-        for col in df.columns:
-            st.write(f"- {col}")
-    
+    df = df.dropna(subset=['chamada_data_inclusao'])
     return df
 
 def extrair_bbm(unidade):
@@ -375,19 +264,29 @@ def extrair_bbm(unidade):
                 return part
     return 'Outros'
 
+
 def extrair_fracao(unidade):
+    """Retorna o nome completo da unidade com seu detalhamento de fração, sem agrupar frações iguais de unidades diferentes."""
     if pd.isna(unidade):
         return 'Outros'
+
     unidade_str = str(unidade).strip()
     if not unidade_str or unidade_str.lower() == 'nan':
         return 'Outros'
+
+    # Remove informações em parênteses para evitar duplicidade textual
     unidade_str = re.sub(r'\s*\([^)]*\)', '', unidade_str)
     partes = [p.strip() for p in unidade_str.split('/') if p.strip()]
     if not partes:
         return 'Outros'
+
+    # Preserva o caminho completo da unidade/fração para distinguir unidades diferentes
+    # Ex.: "BBM 2 / 3ª Cia / 1ª Fra" e "BBM 3 / 3ª Cia / 1ª Fra" permanecem distintos
     return ' / '.join(partes)
 
+
 def extrair_recursos(df):
+    """Retorna lista ordenada de códigos de recursos únicos a partir da coluna 'Empenhos.recurso_codigo_prefixo'."""
     if 'Empenhos.recurso_codigo_prefixo' not in df.columns:
         return []
     recursos = set()
@@ -395,6 +294,7 @@ def extrair_recursos(df):
         val_str = str(val).strip()
         if not val_str:
             continue
+        # Normaliza separadores: " / " vira ","
         val_str = val_str.replace(' / ', ',')
         if ',' in val_str:
             for item in val_str.split(','):
@@ -405,7 +305,9 @@ def extrair_recursos(df):
             recursos.add(val_str)
     return sorted(recursos)
 
+
 def coluna_ou_none(df, *nomes):
+    """Retorna o primeiro nome de coluna existente na lista, ou None."""
     for nome in nomes:
         if nome in df.columns:
             return nome
@@ -423,30 +325,20 @@ with st.sidebar:
         accept_multiple_files=True
     )
     
-    rec_filter = []
+    rec_filter = []  # Garante que a variável exista mesmo sem arquivos
 
     if uploaded_files:
         dfs = {}
         for file in uploaded_files:
-            try:
-                df = load_data(file)
-                if df is not None and not df.empty:
-                    dfs[file.name] = df
-                else:
-                    st.warning(f"⚠️ O arquivo {file.name} não contém dados válidos.")
-            except Exception as e:
-                st.error(f"❌ Erro ao processar {file.name}: {str(e)[:200]}")
-        
-        if not dfs:
-            st.error("❌ Nenhum arquivo pôde ser carregado. Verifique o formato dos arquivos.")
-            st.stop()
+            df = load_data(file)
+            dfs[file.name] = df
         
         combined_df = pd.concat(
             [df.assign(arquivo=name) for name, df in dfs.items()],
             ignore_index=True
         )
         
-        st.success(f"✅ {len(dfs)} arquivo(s) carregado(s)! Total: {len(combined_df)} registros.")
+        st.success(f"✅ {len(uploaded_files)} arquivo(s) carregado(s)!")
         
         st.header("🔍 Filtros")
         
@@ -499,6 +391,7 @@ with st.sidebar:
         )
         classificacoes = sorted(df_filtro[coluna_classificacao].dropna().unique()) if coluna_classificacao else []
         unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique()) if 'Chamada_atendimentos.unidade_servico_nome' in df_filtro.columns else []
+        # NOVO: filtro de recursos empenhados
         recursos_unicos = extrair_recursos(df_filtro)
 
         with st.expander("Filtros adicionais", expanded=True):
@@ -517,6 +410,7 @@ with st.sidebar:
             df_filtered = df_filtered[df_filtered[coluna_classificacao].isin(class_filter)]
         if uni_filter:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.unidade_servico_nome'].isin(uni_filter)]
+        # Filtro por recursos empenhados
         if rec_filter:
             def has_selected_resource(val):
                 if pd.isna(val):
@@ -525,19 +419,18 @@ with st.sidebar:
                 return any(r in resources for r in rec_filter)
             df_filtered = df_filtered[df_filtered['Empenhos.recurso_codigo_prefixo'].apply(has_selected_resource)]
         
+        # Armazenar em session_state para uso após a sidebar
         st.session_state.df_filtered = df_filtered
     else:
         st.info("👈 Faça upload de um ou mais arquivos .xlsx ou .csv para começar a análise.")
         st.stop()
 
+# Verificar se df_filtered está disponível
 if 'df_filtered' not in st.session_state:
     st.stop()
 
+# Recuperar df_filtered do session_state
 df_filtered = st.session_state.df_filtered
-
-if df_filtered.empty:
-    st.warning("⚠️ Nenhum dado disponível para análise. Tente carregar outro arquivo.")
-    st.stop()
 
 # ==========================
 # CARDS DE MÉTRICAS
@@ -579,12 +472,15 @@ col6.metric("📋 Classificação Mais Frequente", classificacao_top)
 st.divider()
 
 # ==========================
-# CÁLCULO DO TEMPO DE ATENDIMENTO
+# CÁLCULO DO TEMPO DE ATENDIMENTO (preparação dos dados)
 # ==========================
+# Garantir que a coluna data_hora_fim exista e seja datetime
 if 'data_hora_fim' not in df_filtered.columns:
     df_filtered['data_hora_fim'] = pd.NaT
 
+# Calcular tempo em minutos
 df_filtered['tempo_minutos'] = (df_filtered['data_hora_fim'] - df_filtered['data_hora']).dt.total_seconds() / 60
+# Remover tempos negativos ou nulos
 df_filtered = df_filtered[df_filtered['tempo_minutos'] >= 0]
 df_filtered['tempo_horas'] = df_filtered['tempo_minutos'] / 60
 
@@ -606,103 +502,98 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 with tab1:
     st.header("📊 Rankings de Dados")
+    col1, col2 = st.columns(2)
     
-    if df_filtered.empty:
-        st.warning("⚠️ Sem dados para exibir.")
-    else:
-        col1, col2 = st.columns(2)
+    with col1:
+        nat_counts = df_filtered['Chamada_atendimentos.natureza_descricao'].value_counts().reset_index()
+        nat_counts.columns = ['natureza', 'count']
+        nat_counts = nat_counts.head(15)
+        fig = px.bar(nat_counts, x='natureza', y='count', title='Top 15 Naturezas',
+                     labels={'natureza': '', 'count': 'Chamadas'}, template='plotly_white')
+        st.plotly_chart(fig, width='stretch')
         
-        with col1:
-            if 'Chamada_atendimentos.natureza_descricao' in df_filtered.columns and not df_filtered['Chamada_atendimentos.natureza_descricao'].dropna().empty:
-                nat_counts = df_filtered['Chamada_atendimentos.natureza_descricao'].value_counts().reset_index()
-                nat_counts.columns = ['natureza', 'count']
-                nat_counts = nat_counts.head(15)
-                fig = px.bar(nat_counts, x='natureza', y='count', title='Top 15 Naturezas',
-                             labels={'natureza': '', 'count': 'Chamadas'}, template='plotly_white')
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("ℹ️ Nenhum dado de natureza disponível.")
-            
-            if 'Chamada_atendimentos.local_do_fato' in df_filtered.columns:
-                locais = df_filtered['Chamada_atendimentos.local_do_fato'].dropna()
-                locais = locais[locais.str.strip() != '']
-                locais = locais[locais.str.strip().str.upper() != 'N/A']
-                if not locais.empty:
-                    loc_counts = locais.value_counts().reset_index()
-                    loc_counts.columns = ['logradouro', 'count']
-                    loc_counts = loc_counts.head(15)
-                    fig = px.bar(loc_counts, x='logradouro', y='count', title='Top 15 Logradouros',
-                                 labels={'logradouro': '', 'count': 'Chamadas'}, template='plotly_white')
-                    st.plotly_chart(fig, use_container_width=True)
+        if 'Chamada_atendimentos.local_do_fato' in df_filtered.columns:
+            locais = df_filtered['Chamada_atendimentos.local_do_fato'].dropna()
+            locais = locais[locais.str.strip() != '']
+            locais = locais[locais.str.strip().str.upper() != 'N/A']
+            if not locais.empty:
+                loc_counts = locais.value_counts().reset_index()
+                loc_counts.columns = ['logradouro', 'count']
+                loc_counts = loc_counts.head(15)
+                fig = px.bar(loc_counts, x='logradouro', y='count', title='Top 15 Logradouros',
+                             labels={'logradouro': '', 'count': 'Chamadas'}, template='plotly_white')
+                st.plotly_chart(fig, width='stretch')
+    
+    with col2:
+        mun_counts = df_filtered['Chamada_atendimentos.local_municipio_nome'].value_counts().reset_index()
+        mun_counts.columns = ['municipio', 'count']
+        mun_counts = mun_counts.head(15)
+        fig = px.bar(mun_counts, x='municipio', y='count', title='Top 15 Municípios',
+                     labels={'municipio': '', 'count': 'Chamadas'}, template='plotly_white')
+        st.plotly_chart(fig, width='stretch')
         
-        with col2:
-            if 'Chamada_atendimentos.local_municipio_nome' in df_filtered.columns and not df_filtered['Chamada_atendimentos.local_municipio_nome'].dropna().empty:
-                mun_counts = df_filtered['Chamada_atendimentos.local_municipio_nome'].value_counts().reset_index()
-                mun_counts.columns = ['municipio', 'count']
-                mun_counts = mun_counts.head(15)
-                fig = px.bar(mun_counts, x='municipio', y='count', title='Top 15 Municípios',
-                             labels={'municipio': '', 'count': 'Chamadas'}, template='plotly_white')
-                st.plotly_chart(fig, use_container_width=True)
-            
-            if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
-                df_filtered['bbm_rank'] = df_filtered['Chamada_atendimentos.unidade_servico_nome'].apply(extrair_bbm)
-                uni_counts = df_filtered['bbm_rank'].value_counts().reset_index()
-                uni_counts.columns = ['unidade', 'count']
-                uni_counts = uni_counts[uni_counts['unidade'] != 'Outros'].head(15)
-                if not uni_counts.empty:
-                    fig = px.bar(uni_counts, x='unidade', y='count', title='Top 15 Unidades',
-                                 labels={'unidade': '', 'count': 'Chamadas'}, template='plotly_white')
-                    st.plotly_chart(fig, use_container_width=True)
+        if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
+            df_filtered['bbm_rank'] = df_filtered['Chamada_atendimentos.unidade_servico_nome'].apply(extrair_bbm)
+            uni_counts = df_filtered['bbm_rank'].value_counts().reset_index()
+            uni_counts.columns = ['unidade', 'count']
+            uni_counts = uni_counts[uni_counts['unidade'] != 'Outros'].head(15)
+            if not uni_counts.empty:
+                fig = px.bar(uni_counts, x='unidade', y='count', title='Top 15 Unidades',
+                             labels={'unidade': '', 'count': 'Chamadas'}, template='plotly_white')
+                st.plotly_chart(fig, width='stretch')
 
-                fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
-                fracoes = fracoes[fracoes != 'Outros']
-                if not fracoes.empty:
-                    frac_counts = fracoes.value_counts().reset_index()
-                    frac_counts.columns = ['fracao', 'count']
-                    frac_counts = frac_counts.head(15)
-                    fig = px.bar(frac_counts, x='fracao', y='count', title='Top 15 Frações / Unidades',
-                                 labels={'fracao': 'Unidade e Fração', 'count': 'Chamadas'}, template='plotly_white')
-                    fig.update_layout(
-                        xaxis={'categoryorder': 'total descending'},
-                        margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-        
-        col3, col4 = st.columns(2)
-        with col3:
-            if 'Empenhos.recurso_codigo_prefixo' in df_filtered.columns:
-                prefixos_series = df_filtered['Empenhos.recurso_codigo_prefixo'].dropna()
-                prefixos_series = prefixos_series[prefixos_series.str.strip() != '']
-                if not prefixos_series.empty:
-                    all_prefixos = []
-                    for item in prefixos_series:
-                        if ',' in str(item):
-                            partes = [p.strip() for p in str(item).split(',') if p.strip()]
-                            all_prefixos.extend(partes)
-                        else:
-                            all_prefixos.append(str(item).strip())
-                    if all_prefixos:
-                        prefix_counts = pd.Series(all_prefixos).value_counts().reset_index()
-                        prefix_counts.columns = ['prefixo', 'count']
-                        prefix_counts = prefix_counts.head(15)
-                        fig = px.bar(prefix_counts, x='prefixo', y='count', title='Top 15 Viaturas Mais Empenhadas',
-                                     labels={'prefixo': '', 'count': 'Empenhos'}, template='plotly_white')
-                        st.plotly_chart(fig, use_container_width=True)
-        
-        with col4:
-            class_col = coluna_ou_none(df_filtered,
-                'Chamada_atendimentos.chamada_classificacao_descricao',
-                'chamada_classificacao_descricao',
-                'Classificacao',
-                'classificacao'
-            )
-            if class_col and not df_filtered[class_col].dropna().empty:
-                class_counts = df_filtered[class_col].value_counts().reset_index()
-                class_counts.columns = ['classificacao', 'count']
-                class_counts = class_counts.head(10)
-                fig = px.bar(class_counts, x='classificacao', y='count', title='Top 10 Classificações',
-                             labels={'classificacao': '', 'count': 'Chamadas'}, template='plotly_white')
+            fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
+            fracoes = fracoes[fracoes != 'Outros']
+            if not fracoes.empty:
+                frac_counts = fracoes.value_counts().reset_index()
+                frac_counts.columns = ['fracao', 'count']
+                frac_counts = frac_counts.head(15)
+                fig = px.bar(frac_counts, x='fracao', y='count', title='Top 15 Frações / Unidades',
+                             labels={'fracao': 'Unidade e Fração', 'count': 'Chamadas'}, template='plotly_white')
+                fig.update_layout(
+                    width=1400,
+                    height=700,
+                    xaxis={'categoryorder': 'total descending'},
+                    legend={'orientation': 'h', 'yanchor': 'bottom', 'y': 1.02, 'xanchor': 'left', 'x': 0},
+                    margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
+                )
                 st.plotly_chart(fig, use_container_width=True)
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        if 'Empenhos.recurso_codigo_prefixo' in df_filtered.columns:
+            prefixos_series = df_filtered['Empenhos.recurso_codigo_prefixo'].dropna()
+            prefixos_series = prefixos_series[prefixos_series.str.strip() != '']
+            if not prefixos_series.empty:
+                all_prefixos = []
+                for item in prefixos_series:
+                    if ',' in str(item):
+                        partes = [p.strip() for p in str(item).split(',') if p.strip()]
+                        all_prefixos.extend(partes)
+                    else:
+                        all_prefixos.append(str(item).strip())
+                if all_prefixos:
+                    prefix_counts = pd.Series(all_prefixos).value_counts().reset_index()
+                    prefix_counts.columns = ['prefixo', 'count']
+                    prefix_counts = prefix_counts.head(15)
+                    fig = px.bar(prefix_counts, x='prefixo', y='count', title='Top 15 Viaturas Mais Empenhadas',
+                                 labels={'prefixo': '', 'count': 'Empenhos'}, template='plotly_white')
+                    st.plotly_chart(fig, width='stretch')
+    
+    with col4:
+        class_col = coluna_ou_none(df_filtered,
+            'Chamada_atendimentos.chamada_classificacao_descricao',
+            'chamada_classificacao_descricao',
+            'Classificacao',
+            'classificacao'
+        )
+        if class_col:
+            class_counts = df_filtered[class_col].value_counts().reset_index()
+            class_counts.columns = ['classificacao', 'count']
+            class_counts = class_counts.head(10)
+            fig = px.bar(class_counts, x='classificacao', y='count', title='Top 10 Classificações',
+                         labels={'classificacao': '', 'count': 'Chamadas'}, template='plotly_white')
+            st.plotly_chart(fig, width='stretch')
 
 # ==========================
 # ABA 2 - EVOLUÇÃO
@@ -719,7 +610,7 @@ with tab2:
                           title='Comparação Mensal por Ano (dados filtrados)',
                           labels={'mes': 'Mês', 'chamadas': 'Chamadas'},
                           template='plotly_white')
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.info("ℹ️ Selecione um período que contenha pelo menos dois anos distintos para a comparação mensal.")
     else:
@@ -780,7 +671,7 @@ with tab2:
                           title='Projeção de Chamadas (próximos 6 meses) com Desvio Padrão',
                           labels={'periodo_str': 'Mês/Ano', 'chamadas': 'Chamadas'},
                           template='plotly_white')
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
         else:
             st.info("ℹ️ Dados insuficientes para realizar a projeção (mínimo 2 meses com ocorrências).")
     else:
@@ -790,7 +681,7 @@ with tab2:
     daily.columns = ['data', 'chamadas']
     fig = px.line(daily, x='data', y='chamadas', title='Chamadas por Dia',
                   labels={'data': 'Data', 'chamadas': 'Chamadas'}, template='plotly_white')
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 # ==========================
 # ABA 3 - DISTRIBUIÇÃO
@@ -806,7 +697,7 @@ with tab3:
         hour_counts.columns = ['hora', 'chamadas']
         fig = px.bar(hour_counts, x='hora', y='chamadas', title='Chamadas por Hora do Dia',
                      labels={'hora': 'Hora', 'chamadas': 'Chamadas'}, template='plotly_white')
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     
     with col2:
         dias_semana = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
@@ -817,7 +708,7 @@ with tab3:
         week_counts.columns = ['dia', 'chamadas']
         fig = px.bar(week_counts, x='dia', y='chamadas', title='Chamadas por Dia da Semana',
                      labels={'dia': '', 'chamadas': 'Chamadas'}, template='plotly_white')
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     
     col3, col4 = st.columns(2)
     
@@ -833,7 +724,7 @@ with tab3:
             class_counts.columns = ['classificacao', 'count']
             fig = px.pie(class_counts, names='classificacao', values='count',
                          title='Distribuição por Classificação', template='plotly_white')
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
     
     with col4:
         if 'Chamada_atendimentos.unidade_servico_nome' in df_filtered.columns:
@@ -849,7 +740,7 @@ with tab3:
             if not bbm_counts.empty:
                 fig = px.bar(bbm_counts, x='bbm', y='chamadas', title='Chamadas por BBM / CIA IND',
                              labels={'bbm': '', 'chamadas': 'Chamadas'}, template='plotly_white')
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             fracoes = df_filtered['Chamada_atendimentos.unidade_servico_nome'].dropna().apply(extrair_fracao)
             fracoes = fracoes[fracoes != 'Outros']
@@ -860,7 +751,10 @@ with tab3:
                 fig = px.bar(frac_counts, x='fracao', y='chamadas', title='Detalhamento por Frações / Unidades',
                              labels={'fracao': 'Unidade e Fração', 'chamadas': 'Chamadas'}, template='plotly_white')
                 fig.update_layout(
+                    width=1400,
+                    height=700,
                     xaxis={'categoryorder': 'total descending'},
+                    legend={'orientation': 'h', 'yanchor': 'bottom', 'y': 1.02, 'xanchor': 'left', 'x': 0},
                     margin={'l': 40, 'r': 20, 't': 60, 'b': 180}
                 )
                 st.plotly_chart(fig, use_container_width=True)
@@ -904,7 +798,7 @@ with tab4:
                     else:
                         text = str(value)
                     if max_len is not None and len(text) > max_len:
-                        text = text[:max_len] + '...'
+                        text = text[:max_len]
                     return text
 
                 for idx, row in map_df_sample.iterrows():
@@ -945,21 +839,24 @@ with tab4:
 with tab5:
     st.header("⏱️ Tempo de Atendimento")
     
+    # Filtrar registros com data_hora_fim disponível
     df_tempo = df_filtered.dropna(subset=['data_hora_fim']).copy()
     
     if df_tempo.empty:
         st.info("ℹ️ Nenhum registro com data/hora de classificação (fim) disponível para análise de tempo.")
     else:
+        # Remover tempos negativos (já feito globalmente) e outliers extremos (opcional)
         max_tempo = st.slider(
             "Filtrar tempo máximo (horas) para análise",
             min_value=1.0,
-            max_value=720.0,
-            value=168.0,
+            max_value=720.0,  # 30 dias
+            value=168.0,      # 7 dias
             step=1.0,
             help="Remover ocorrências com tempo acima deste limite para melhor visualização."
         )
         df_tempo_filtrado = df_tempo[df_tempo['tempo_horas'] <= max_tempo].copy()
         
+        # Métricas
         media = df_tempo_filtrado['tempo_horas'].mean()
         mediana = df_tempo_filtrado['tempo_horas'].median()
         maximo = df_tempo_filtrado['tempo_horas'].max()
@@ -976,7 +873,9 @@ with tab5:
         
         st.divider()
         
+        # Gráfico 1: Distribuição geral com destaque para > 24h
         st.subheader("Distribuição do Tempo de Atendimento (em horas)")
+        # Criar uma coluna para categorizar
         df_tempo_filtrado['categoria'] = np.where(df_tempo_filtrado['tempo_horas'] <= 24, 'Até 24h', 'Acima de 24h')
         
         fig1 = px.histogram(
@@ -990,8 +889,9 @@ with tab5:
             barmode='stack'
         )
         fig1.update_layout(legend_title_text='')
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width='stretch')
         
+        # Gráfico 2: Apenas > 24h (em dias)
         df_acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].copy()
         if not df_acima_24h.empty:
             df_acima_24h['dias'] = np.ceil(df_acima_24h['tempo_horas'] / 24).astype(int)
@@ -1003,10 +903,11 @@ with tab5:
                 labels={'dias': 'Dias', 'count': 'Número de Chamadas'},
                 template='plotly_white'
             )
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
         else:
             st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
         
+        # Tabela resumo por Classificação
         st.subheader("📋 Resumo por Classificação da Chamada")
         
         class_col = coluna_ou_none(df_tempo_filtrado,
@@ -1016,6 +917,7 @@ with tab5:
             'classificacao'
         )
         if class_col:
+            # Agrupar por classificação
             df_class = df_tempo_filtrado.groupby(class_col).agg(
                 media_horas=('tempo_horas', 'mean'),
                 mediana_horas=('tempo_horas', 'median'),
@@ -1024,6 +926,7 @@ with tab5:
                 maximo_horas=('tempo_horas', 'max')
             ).reset_index()
             
+            # Calcular percentual de atendimentos > 24h por classificação
             acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby(class_col).size()
             df_class['acima_24h'] = df_class[class_col].map(acima_24h).fillna(0).astype(int)
             df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
@@ -1031,6 +934,7 @@ with tab5:
         else:
             df_class = pd.DataFrame(columns=['classificacao', 'media_horas', 'mediana_horas', 'desvio_horas', 'contagem', 'maximo_horas', 'acima_24h', 'perc_acima_24h'])
         
+        # Filtro opcional: mínimo de registros
         min_registros = st.number_input(
             "Mínimo de registros por classificação para exibição",
             min_value=1,
@@ -1044,8 +948,10 @@ with tab5:
         if df_class_filtrada.empty:
             st.info(f"Nenhuma classificação com pelo menos {min_registros} registros.")
         else:
+            # Ordenar por média decrescente
             df_class_filtrada = df_class_filtrada.sort_values('media_horas', ascending=False)
             
+            # Formatação para exibição
             tabela = df_class_filtrada.copy()
             tabela['media_horas'] = tabela['media_horas'].map(lambda x: f"{x:.2f}")
             tabela['mediana_horas'] = tabela['mediana_horas'].map(lambda x: f"{x:.2f}")
