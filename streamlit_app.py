@@ -179,11 +179,11 @@ def load_data(uploaded_file):
     
     # Detecta encoding do arquivo
     encoding = detect_encoding(uploaded_file)
-    st.info(f"Encoding detectado: {encoding}")
+    # st.info(f"Encoding detectado: {encoding}")
     
     # Detecta separador
     delimiter = detect_delimiter(uploaded_file)
-    st.info(f"Separador detectado: '{delimiter}'")
+    # st.info(f"Separador detectado: '{delimiter}'")
     
     # Lista de encodings para tentar
     encodings_to_try = [encoding, 'latin-1', 'iso-8859-1', 'cp1252', 'utf-8', 'utf-8-sig']
@@ -213,7 +213,7 @@ def load_data(uploaded_file):
             # Verifica se temos as colunas necessárias
             if 'chamada_numero' in df.columns or 'data_hora_criacao' in df.columns:
                 # Processa o DataFrame
-                st.success(f"✅ Arquivo lido com sucesso usando encoding '{enc}'")
+                # st.success(f"✅ Arquivo lido com sucesso usando encoding '{enc}'")
                 return process_dataframe(df)
                 
         except Exception as e:
@@ -239,7 +239,7 @@ def load_data(uploaded_file):
         df = normalize_column_names(df)
         
         if len(df.columns) >= 3 and ('chamada_numero' in df.columns or 'data_hora_criacao' in df.columns):
-            st.success(f"✅ Arquivo lido com sucesso usando engine='python'")
+            # st.success(f"✅ Arquivo lido com sucesso usando engine='python'")
             return process_dataframe(df)
     except Exception as e:
         st.warning(f"Erro na tentativa com engine='python': {e}")
