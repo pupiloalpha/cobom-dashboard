@@ -134,7 +134,7 @@ with tab1:
             fraction_counts = fraction_counts[fraction_counts.fracao.ne("Outros")]
             fig = plot_bar(fraction_counts, "fracao", "count", "Top 15 Frações / Unidades", 15)
             fig.update_layout(width=1400, height=700, xaxis={"categoryorder": "total descending"}, margin={"l": 40, "r": 20, "t": 60, "b": 180})
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
     left, right = st.columns(2)
     with left:
         if "Empenhos.recurso_codigo_prefixo" in df_filtered:
@@ -158,10 +158,10 @@ with tab2:
         full = full.sort_values("periodo").reset_index(drop=True)
         full["indice"] = np.arange(len(full))
         model = LinearRegression().fit(full[["indice"]], full["chamadas"])
-        future_indices = np.arange(full.indice.max() + 1, full.indice.max() + 7).reshape(-1, 1)
+        future_indices = pd.DataFrame({"indice": np.arange(full.indice.max() + 1, full.indice.max() + 7)})
         predictions = model.predict(future_indices)
         deviation = np.std(full["chamadas"] - model.predict(full[["indice"]]))
-        future_dates = pd.date_range(start=full.periodo.iloc[-1], periods=7, freq="M")[1:]
+        future_dates = pd.date_range(start=full.periodo.iloc[-1], periods=7, freq="ME")[1:]
         history = pd.DataFrame({"periodo_str": full.periodo.dt.strftime("%Y-%m"), "chamadas": full.chamadas, "tipo": "Histórico"})
         future = pd.DataFrame({"periodo_str": future_dates.strftime("%Y-%m"), "chamadas": predictions, "tipo": "Projeção"})
         upper = future.assign(chamadas=future.chamadas + deviation, tipo="Limite Superior")
@@ -249,7 +249,7 @@ with tab5:
             for column in ["media_horas", "mediana_horas", "maximo_horas"]: summary[column] = summary[column].map(lambda value: f"{value:.2f}")
             summary["desvio_horas"] = summary.desvio_horas.map(lambda value: f"{value:.2f}" if pd.notna(value) else "-")
             summary["perc_acima_24h"] = summary.perc_acima_24h.map(lambda value: f"{value:.1f}%")
-            st.dataframe(summary.rename(columns={class_column: "Classificação", "media_horas": "Média (h)", "mediana_horas": "Mediana (h)", "desvio_horas": "Desvio (h)", "contagem": "Nº Chamadas", "maximo_horas": "Máximo (h)", "acima_24h": "> 24h", "perc_acima_24h": "% > 24h"}), use_container_width=True, hide_index=True)
+            st.dataframe(summary.rename(columns={class_column: "Classificação", "media_horas": "Média (h)", "mediana_horas": "Mediana (h)", "desvio_horas": "Desvio (h)", "contagem": "Nº Chamadas", "maximo_horas": "Máximo (h)", "acima_24h": "> 24h", "perc_acima_24h": "% > 24h"}), width="stretch", hide_index=True)
 
 st.markdown("---")
 st.caption("Dashboard desenvolvido com Streamlit | Dados do COBOM-BH")
