@@ -35,42 +35,31 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def parse_coordinate(value: Any, max_abs: float) -> float:
-    """Converte coordenada decimal ou DMS, descartando valores impossiveis."""
+    """Converte coordenadas em formatos decimais brasileiros e exportados."""
     if pd.isna(value):
         return np.nan
 
-    text = str(value).strip().upper()
-    if not text:
+    value_str = str(value).strip().replace(" ", "")
+    if not value_str or value_str.lower() == "nan":
         return np.nan
 
-    direction_match = re.search(r"([NSEW])\s*$", text)
-    direction = direction_match.group(1) if direction_match else ""
-    if direction_match:
-        text = text[: direction_match.start()].strip()
-
-    negative = text.startswith("-") or direction in ("S", "W")
-    text = text.lstrip("+-").strip().replace(",", ".")
-
     try:
-        dms_match = re.fullmatch(
-            r"(\d+(?:\.\d+)?)\s*[°º]\s*"
-            r"(\d+(?:\.\d+)?)?\s*[\'′m]?\s*"
-            r"(\d+(?:\.\d+)?)?\s*[\"″s]?",
-            text,
-        )
-        if dms_match and any(dms_match.groups()[1:]):
-            degrees = float(dms_match.group(1))
-            minutes = float(dms_match.group(2) or 0)
-            seconds = float(dms_match.group(3) or 0)
-            if minutes >= 60 or seconds >= 60:
-                return np.nan
-            parsed = degrees + minutes / 60 + seconds / 3600
+        if value_str.count(".") > 1 and "," not in value_str:
+            sign = "-" if value_str.startswith("-") else ""
+            unsigned_value = value_str.lstrip("+-")
+            groups = unsigned_value.split(".")
+            decimal_position = min(len(groups[0]), 2)
+            digits = "".join(groups)
+            parsed = float(f"{sign}{digits[:decimal_position]}.{digits[decimal_position:]}")
         else:
-            parsed = float(text)
+            parsed = float(
+                value_str.replace(".", "").replace(",", ".")
+                if "," in value_str
+                else value_str
+            )
     except (TypeError, ValueError):
         return np.nan
 
-    parsed = -abs(parsed) if negative else parsed
     return parsed if abs(parsed) <= max_abs else np.nan
 
 

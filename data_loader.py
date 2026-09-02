@@ -7,8 +7,9 @@ import chardet
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 
-from utils.helpers import normalize_column_names, parse_coordinate, parse_datetime_series
+from utils.helpers import COLUMN_MAPPING, normalize_column_names, parse_coordinate, parse_datetime_series
 
 XLSX_COLUMNS = [
     "chamada_numero", "reds", "data_hora_criacao", "hora_criacao",
@@ -48,21 +49,60 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
                 io.BytesIO(raw), sep=None, engine="python", encoding=encoding,
                 dtype=str, on_bad_lines="skip",
             )
-            return _normalize_fixed_schema(normalize_column_names(df), CSV_COLUMNS)
+            return normalize_column_names(df)
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
-    """Le a aba BD_Cobom como no formato original do dashboard."""
+    """Le a aba COBOM e identifica o cabecalho pelos nomes conhecidos."""
     try:
-        try:
-            return pd.read_excel(io.BytesIO(raw), sheet_name="BD_Cobom")
-        except ValueError as error:
-            if "worksheet named 'BD_Cobom'" not in str(error):
-                raise
-            return pd.read_excel(io.BytesIO(raw), sheet_name=0)
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        worksheet = next(
+            (sheet for sheet in workbook.worksheets if sheet.title.strip().lower() == "bd_cobom"),
+            None,
+        )
+        if worksheet is None:
+            worksheet = next(
+                (sheet for sheet in workbook.worksheets if sheet.max_row and sheet.max_column),
+                None,
+            )
+        if worksheet is None:
+            return pd.DataFrame()
+
+        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        known_headers = set(COLUMN_MAPPING) | set(XLSX_COLUMNS) | {
+            "Reds.reds_numero",
+            "chamada_data_inclusao",
+            "chamada_hora_inclusao",
+        }
+        header_index = max(
+            range(len(rows)),
+            key=lambda index: sum(
+                str(value).strip() in known_headers
+                for value in rows[index]
+                if value is not None
+            ),
+            default=0,
+        )
+        header_score = sum(
+            str(value).strip() in known_headers
+            for value in rows[header_index]
+            if value is not None
+        )
+        width = max((len(row) for row in rows), default=0)
+        rows = [row + [None] * (width - len(row)) for row in rows]
+
+        if header_score:
+            header = [
+                str(value).strip() if value is not None and str(value).strip()
+                else f"coluna_{index + 1}"
+                for index, value in enumerate(rows[header_index])
+            ]
+            return pd.DataFrame(rows[header_index + 1:], columns=header)
+
+        return pd.DataFrame(rows[1:], columns=rows[0])
     except Exception as error:
         raise ValueError(f"Excel nao pode ser lido: {error}") from error
 
@@ -97,18 +137,16 @@ def _normalize_fixed_schema_by_name(df: pd.DataFrame) -> pd.DataFrame:
     if "data_hora_criacao" not in result.columns and "chamada_data_inclusao" in df.columns:
         result["data_hora_criacao"] = df["chamada_data_inclusao"]
     if {"data_hora_criacao", "hora_criacao"}.issubset(result.columns):
-        result["data_hora_criacao"] = (
-            result["data_hora_criacao"].astype("string").str.strip()
-            + " "
-            + result["hora_criacao"].astype("string").str.strip()
+        result["data_hora_criacao"] = parse_datetime_series(result["data_hora_criacao"])
+        result["data_hora_criacao"] = result["data_hora_criacao"] + pd.to_timedelta(
+            result["hora_criacao"].astype("string").str.strip(), errors="coerce"
         )
     if "data_hora_situacao_atual" not in result.columns and {
         "data_classificacao", "hora_classificacao"
     }.issubset(result.columns):
-        result["data_hora_situacao_atual"] = (
-            result["data_classificacao"].astype("string").str.strip()
-            + " "
-            + result["hora_classificacao"].astype("string").str.strip()
+        result["data_hora_situacao_atual"] = parse_datetime_series(result["data_classificacao"])
+        result["data_hora_situacao_atual"] = result["data_hora_situacao_atual"] + pd.to_timedelta(
+            result["hora_classificacao"].astype("string").str.strip(), errors="coerce"
         )
     return result
 
