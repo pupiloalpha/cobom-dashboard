@@ -147,6 +147,32 @@ def normalize_column_names(df):
     
     return df
 
+def parse_coordinate(value, max_abs):
+    """Converte coordenadas em formatos decimais brasileiros e exportados."""
+    if pd.isna(value):
+        return np.nan
+
+    value_str = str(value).strip().replace(' ', '')
+    if not value_str or value_str.lower() == 'nan':
+        return np.nan
+
+    try:
+        if value_str.count('.') > 1 and ',' not in value_str:
+            sign = '-' if value_str.startswith('-') else ''
+            unsigned_value = value_str.lstrip('+-')
+            groups = unsigned_value.split('.')
+            decimal_position = min(len(groups[0]), 2)
+            digits = ''.join(groups)
+            parsed = float(f'{sign}{digits[:decimal_position]}.{digits[decimal_position:]}')
+        else:
+            parsed = float(value_str.replace('.', '').replace(',', '.')
+                            if ',' in value_str
+                            else value_str)
+    except (TypeError, ValueError):
+        return np.nan
+
+    return parsed if abs(parsed) <= max_abs else np.nan
+
 @st.cache_data
 def load_data(uploaded_file):
     file_name = uploaded_file.name.lower()
@@ -286,12 +312,12 @@ def process_dataframe(df):
                 pass
     
     # Converte coordenadas
-    for col in ['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude']:
+    for col, max_abs in [
+        ('Chamada_atendimentos.local_latitude', 90),
+        ('Chamada_atendimentos.local_longitude', 180),
+    ]:
         if col in df.columns:
-            df[col] = df[col].apply(
-                lambda x: float(str(x).replace(',', '.').replace(' ', '')) 
-                if pd.notna(x) and str(x).strip() != '' and str(x).strip() != 'nan' else np.nan
-            )
+            df[col] = df[col].apply(parse_coordinate, max_abs=max_abs)
     
     # Extrai município do local
     if 'Chamada_atendimentos.local_do_fato' in df.columns:
