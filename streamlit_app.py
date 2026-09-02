@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
 import io
 import re
+import csv
 
 # Configuração da página
 st.set_page_config(page_title="Dashboard COBOM-BH", layout="wide")
@@ -40,208 +41,211 @@ st.markdown("Análise de chamadas do Corpo de Bombeiros Militar de Minas Gerais 
 # ==========================
 
 def detect_csv_header(file):
-    """Retorna o índice da linha que contém o cabeçalho (início com 'chamada_numero')."""
+    """Retorna o índice da linha que contém o cabeçalho."""
     file.seek(0)
     lines = file.readlines()
     for i, line in enumerate(lines):
         if not line.strip():
             continue
-        parts = [p.strip() for p in line.split(b'|')]
-        if parts and parts[0] == b'chamada_numero':
-            file.seek(0)
-            return i
-    for i, line in enumerate(lines):
-        if line.count(b'|') > 10:
+        # Verifica se a linha contém 'chamada_numero' ou 'Nº chamada' ou 'Data/hora de criação'
+        line_str = line.decode('utf-8', errors='ignore')
+        if 'chamada_numero' in line_str or 'Nº chamada' in line_str or 'Data/hora de criação' in line_str:
             file.seek(0)
             return i
     file.seek(0)
     return 0
 
+def detect_delimiter(file):
+    """Detecta o separador do arquivo CSV."""
+    file.seek(0)
+    sample = file.read(1024).decode('utf-8', errors='ignore')
+    file.seek(0)
+    
+    # Verifica se é TAB
+    if '\t' in sample:
+        return '\t'
+    # Verifica se é ponto e vírgula
+    if ';' in sample:
+        return ';'
+    # Verifica se é vírgula
+    if ',' in sample:
+        return ','
+    # Verifica se é pipe
+    if '|' in sample:
+        return '|'
+    return '\t'  # padrão
+
+def normalize_column_names(df):
+    """Normaliza os nomes das colunas para o padrão esperado pelo sistema."""
+    # Mapeamento de colunas em português para o padrão do sistema
+    column_mapping = {
+        'Nº chamada': 'chamada_numero',
+        'Nº REDS': 'reds',
+        'Data/hora de criação': 'data_hora_criacao',
+        'Local do fato': 'Chamada_atendimentos.local_do_fato',
+        'Latitude  do local': 'Chamada_atendimentos.local_latitude',
+        'Longitude do local': 'Chamada_atendimentos.local_longitude',
+        'Natureza': 'Chamada_atendimentos.natureza_descricao',
+        'Unidade Responsável': 'Chamada_atendimentos.unidade_servico_nome',
+        'Recursos empenhados': 'Empenhos.recurso_codigo_prefixo',
+        'Alerta': 'alerta',
+        'Destaque': 'destaque',
+        'Envolve autoridade': 'envolve_autoridade',
+        'Tipo de classificação': 'Chamada_atendimentos.chamada_classificacao_descricao',
+        'Situação': 'situacao',
+        'Data/hora da situação atual': 'data_hora_situacao_atual',
+        'Evento associado': 'evento_associado'
+    }
+    
+    # Renomeia as colunas que existem no DataFrame
+    for old_name, new_name in column_mapping.items():
+        if old_name in df.columns:
+            df.rename(columns={old_name: new_name}, inplace=True)
+    
+    return df
+
 @st.cache_data
 def load_data(uploaded_file):
     file_name = uploaded_file.name.lower()
     
-    # ----- TENTATIVA 1: CSV separado por ";" (novo formato) -----
-    if file_name.endswith('.csv'):
-        encodings = ['utf-8-sig', 'utf-8', 'latin-1']
-        for encoding in encodings:
-            try:
-                uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file, sep=';', encoding=encoding,
-                                 dtype=str, on_bad_lines='skip')
-                df.columns = df.columns.str.strip()
-                
-                if df.shape[1] >= 16:
-                    col_map = {
-                        0: 'chamada_numero',
-                        1: 'reds',
-                        2: 'data_hora_criacao',
-                        3: 'Chamada_atendimentos.local_do_fato',
-                        4: 'Chamada_atendimentos.local_latitude',
-                        5: 'Chamada_atendimentos.local_longitude',
-                        6: 'Chamada_atendimentos.natureza_descricao',
-                        7: 'Chamada_atendimentos.unidade_servico_nome',
-                        8: 'Empenhos.recurso_codigo_prefixo',
-                        9: 'alerta',
-                        10: 'destaque',
-                        11: 'envolve_autoridade',
-                        12: 'Chamada_atendimentos.chamada_classificacao_descricao',
-                        13: 'situacao',
-                        14: 'data_hora_situacao_atual',  # Fim do atendimento (classificação)
-                        15: 'evento_associado'
-                    }
-                    col_names = list(df.columns)
-                    for i, new_name in col_map.items():
-                        if i < len(col_names):
-                            col_names[i] = new_name
-                    df.columns = col_names
-                    df = df[list(col_map.values())]
-                    
-                    #st.info("📄 Formato CSV novo detectado (separador ;).")
-                    
-                    # Extrai município
-                    def extract_municipio(local):
-                        if pd.isna(local):
-                            return np.nan
-                        partes = local.split(' - ')
-                        if len(partes) >= 2:
-                            return partes[-1].strip()
-                        return np.nan
-                    df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
-                    
-                    # Converte data/hora de início
-                    dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
-                    df['chamada_data_inclusao'] = dt_series.dt.normalize()
-                    df['chamada_hora_inclusao'] = dt_series.dt.time
-                    df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
-                    df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
-                    df.drop(columns=['data_hora_criacao'], inplace=True)
-                    
-                    # Converte data/hora de fim (classificação)
-                    fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
-                    df['data_hora_fim'] = fim_series
-                    df.drop(columns=['data_hora_situacao_atual'], inplace=True)
-                    
-                    # Converte coordenadas
-                    for col in ['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude']:
-                        df[col] = df[col].apply(
-                            lambda x: float(str(x).replace(',', '.')) 
-                            if pd.notna(x) and str(x).strip() != '' else np.nan
-                        )
-                    
-                    # Colunas auxiliares
-                    df['ano'] = df['chamada_data_inclusao'].dt.year
-                    df['mes'] = df['chamada_data_inclusao'].dt.month
-                    df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
-                    df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
-                    df['hora'] = df['hora'].astype(int)
-                    df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
-                    
-                    df = df.dropna(subset=['chamada_data_inclusao'])
-                    return df
-            except Exception as e:
-                continue
-        
-        st.warning("Não foi possível ler o arquivo com os encodings testados. Tentando formato antigo...")
-        uploaded_file.seek(0)
-
-    # ----- TENTATIVA 2: CSV separado por "|" (formato antigo) ou Excel -----
-    if file_name.endswith('.csv'):
-        header_line = detect_csv_header(uploaded_file)
-        try:
-            df = pd.read_csv(uploaded_file, sep='|', skiprows=header_line,
-                             dtype=str, engine='python', encoding='latin-1')
-        except Exception as e:
-            st.error(f"Erro ao ler CSV antigo: {e}")
-            st.stop()
-        
-        df.columns = df.columns.str.strip()
-        if 'chamada_data_inclusao' not in df.columns:
-            uploaded_file.seek(0)
-            lines = uploaded_file.read().decode('latin-1').splitlines()
-            header_line_content = lines[header_line].strip()
-            col_names = [c.strip() for c in header_line_content.split('|')]
-            data_lines = lines[header_line+1:]
-            data_str = '\n'.join(data_lines)
-            from io import StringIO
-            df = pd.read_csv(StringIO(data_str), sep='|', names=col_names,
-                             dtype=str, engine='python', encoding='latin-1')
-            df = df[df[col_names[0]].notna()]
-    else:
-        # Excel
-        df = pd.read_excel(uploaded_file, sheet_name="BD_Cobom")
+    # Tenta ler o arquivo com diferentes separadores e encodings
+    encodings = ['utf-8-sig', 'utf-8', 'latin-1', 'iso-8859-1']
     
-    # ----- Processamento do formato antigo -----
-    if 'chamada_data_inclusao' not in df.columns:
-        st.error("❌ O arquivo não contém a coluna 'chamada_data_inclusao' e não pôde ser processado.")
+    # Detecta o separador
+    delimiter = detect_delimiter(uploaded_file)
+    
+    for encoding in encodings:
+        try:
+            uploaded_file.seek(0)
+            
+            # Tenta ler com pandas
+            df = pd.read_csv(
+                uploaded_file, 
+                sep=delimiter, 
+                encoding=encoding,
+                dtype=str, 
+                on_bad_lines='skip'
+            )
+            df.columns = df.columns.str.strip()
+            
+            # Se tem poucas colunas, tenta outro separador
+            if len(df.columns) < 5:
+                continue
+            
+            # Normaliza os nomes das colunas
+            df = normalize_column_names(df)
+            
+            # Verifica se temos as colunas necessárias
+            if 'chamada_numero' in df.columns or 'data_hora_criacao' in df.columns:
+                # Processa o DataFrame
+                return process_dataframe(df)
+                
+        except Exception as e:
+            continue
+    
+    st.warning("Não foi possível ler o arquivo com os encodings testados. Tentando formato antigo...")
+    uploaded_file.seek(0)
+    
+    # Tentativa com formato antigo (pipe)
+    try:
+        df = pd.read_csv(uploaded_file, sep='|', encoding='latin-1', dtype=str, on_bad_lines='skip')
+        df.columns = df.columns.str.strip()
+        df = normalize_column_names(df)
+        
+        if 'chamada_data_inclusao' in df.columns:
+            return process_dataframe(df)
+    except Exception as e:
+        st.error(f"Erro ao ler arquivo: {e}")
         st.stop()
     
-    df['chamada_data_inclusao'] = pd.to_datetime(df['chamada_data_inclusao'], format='%d/%m/%Y', errors='coerce')
-    df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'], errors='coerce')
-    df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
+    # Última tentativa: ler como CSV com separador TAB
+    try:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep='\t', encoding='utf-8', dtype=str, on_bad_lines='skip')
+        df.columns = df.columns.str.strip()
+        df = normalize_column_names(df)
+        
+        if 'chamada_numero' in df.columns or 'data_hora_criacao' in df.columns:
+            return process_dataframe(df)
+    except Exception as e:
+        st.error(f"Erro ao ler o arquivo: {e}")
     
-    # Data/hora de fim (classificação) - colunas N e O
-    if 'Chamada_atendimentos.chamada_classificacao_data' in df.columns and 'Chamada_atendimentos.chamada_classificacao_hora' in df.columns:
-        df['data_hora_fim'] = pd.to_datetime(
-            df['Chamada_atendimentos.chamada_classificacao_data'].astype(str) + ' ' + 
-            df['Chamada_atendimentos.chamada_classificacao_hora'].astype(str),
-            format='%d/%m/%Y %H:%M:%S', errors='coerce'
-        )
-    else:
-        # Se não houver colunas de fim, criar como NaT
-        df['data_hora_fim'] = pd.NaT
+    st.error("❌ O arquivo não pôde ser processado. Verifique o formato do arquivo.")
+    st.stop()
+
+def process_dataframe(df):
+    """Processa o DataFrame com os dados do COBOM."""
+    
+    # Se a coluna data_hora_criacao estiver em formato de data/hora
+    if 'data_hora_criacao' in df.columns:
+        # Tenta converter para datetime
+        try:
+            dt_series = pd.to_datetime(df['data_hora_criacao'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+            if dt_series.isna().all():
+                # Tenta outro formato
+                dt_series = pd.to_datetime(df['data_hora_criacao'], errors='coerce')
+            
+            df['chamada_data_inclusao'] = dt_series.dt.normalize()
+            df['chamada_hora_inclusao'] = dt_series.dt.time
+            df['chamada_hora_inclusao'] = pd.to_timedelta(df['chamada_hora_inclusao'].astype(str))
+            df['data_hora'] = df['chamada_data_inclusao'] + df['chamada_hora_inclusao']
+            
+        except Exception as e:
+            st.warning(f"Erro ao converter data/hora: {e}")
+            # Tenta converter de outra forma
+            try:
+                df['chamada_data_inclusao'] = pd.to_datetime(df['data_hora_criacao']).dt.normalize()
+                df['chamada_hora_inclusao'] = pd.to_timedelta(pd.to_datetime(df['data_hora_criacao']).dt.time.astype(str))
+                df['data_hora'] = pd.to_datetime(df['data_hora_criacao'])
+            except:
+                pass
     
     # Converte coordenadas
-    if 'Chamada_atendimentos.local_latitude' in df.columns:
-        def parse_coord(x):
-            if pd.isna(x):
-                return np.nan
-            if isinstance(x, (int, float)):
-                return float(x)
-            if isinstance(x, str):
-                cleaned = x.strip().replace(',', '.').replace(' ', '')
-                try:
-                    return float(cleaned)
-                except:
-                    return np.nan
-            return np.nan
-        df['Chamada_atendimentos.local_latitude'] = df['Chamada_atendimentos.local_latitude'].apply(parse_coord)
+    for col in ['Chamada_atendimentos.local_latitude', 'Chamada_atendimentos.local_longitude']:
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: float(str(x).replace(',', '.').replace(' ', '')) 
+                if pd.notna(x) and str(x).strip() != '' else np.nan
+            )
     
-    if 'Chamada_atendimentos.local_longitude' in df.columns:
-        def parse_coord_long(x):
-            if pd.isna(x):
-                return np.nan
-            if isinstance(x, (int, float)):
-                return float(x)
-            if isinstance(x, str):
-                cleaned = x.strip().replace(',', '.').replace(' ', '')
-                try:
-                    return float(cleaned)
-                except:
-                    return np.nan
-            return np.nan
-        df['Chamada_atendimentos.local_longitude'] = df['Chamada_atendimentos.local_longitude'].apply(parse_coord_long)
-    
-    # Extrai município (se não existir)
-    if 'Chamada_atendimentos.local_municipio_nome' not in df.columns:
+    # Extrai município do local
+    if 'Chamada_atendimentos.local_do_fato' in df.columns:
         def extract_municipio(local):
             if pd.isna(local):
                 return np.nan
-            partes = local.split(' - ')
+            partes = str(local).split(' - ')
             if len(partes) >= 2:
                 return partes[-1].strip()
             return np.nan
         df['Chamada_atendimentos.local_municipio_nome'] = df['Chamada_atendimentos.local_do_fato'].apply(extract_municipio)
     
     # Colunas auxiliares
-    df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
-    df['ano'] = df['chamada_data_inclusao'].dt.year
-    df['mes'] = df['chamada_data_inclusao'].dt.month
-    df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
-    df['hora'] = df['hora'].astype(int)
-    df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
+    if 'chamada_data_inclusao' in df.columns:
+        df['ano'] = df['chamada_data_inclusao'].dt.year
+        df['mes'] = df['chamada_data_inclusao'].dt.month
+        df['mes_ano'] = df['chamada_data_inclusao'].dt.to_period('M').astype(str)
+        
+        if 'chamada_hora_inclusao' in df.columns:
+            df['hora'] = df['chamada_hora_inclusao'].dt.total_seconds() // 3600
+            df['hora'] = df['hora'].astype(int)
+            df['dia_semana'] = df['chamada_data_inclusao'].dt.dayofweek
     
-    df = df.dropna(subset=['chamada_data_inclusao'])
+    # Data/hora de fim (se existir)
+    if 'data_hora_situacao_atual' in df.columns:
+        try:
+            fim_series = pd.to_datetime(df['data_hora_situacao_atual'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+            if fim_series.isna().all():
+                fim_series = pd.to_datetime(df['data_hora_situacao_atual'], errors='coerce')
+            df['data_hora_fim'] = fim_series
+        except:
+            df['data_hora_fim'] = pd.NaT
+    else:
+        df['data_hora_fim'] = pd.NaT
+    
+    # Remove linhas sem data de inclusão
+    if 'chamada_data_inclusao' in df.columns:
+        df = df.dropna(subset=['chamada_data_inclusao'])
+    
     return df
 
 def extrair_bbm(unidade):
@@ -266,7 +270,7 @@ def extrair_bbm(unidade):
 
 
 def extrair_fracao(unidade):
-    """Retorna o nome completo da unidade com seu detalhamento de fração, sem agrupar frações iguais de unidades diferentes."""
+    """Retorna o nome completo da unidade com seu detalhamento de fração."""
     if pd.isna(unidade):
         return 'Outros'
 
@@ -274,19 +278,17 @@ def extrair_fracao(unidade):
     if not unidade_str or unidade_str.lower() == 'nan':
         return 'Outros'
 
-    # Remove informações em parênteses para evitar duplicidade textual
+    # Remove informações em parênteses
     unidade_str = re.sub(r'\s*\([^)]*\)', '', unidade_str)
     partes = [p.strip() for p in unidade_str.split('/') if p.strip()]
     if not partes:
         return 'Outros'
 
-    # Preserva o caminho completo da unidade/fração para distinguir unidades diferentes
-    # Ex.: "BBM 2 / 3ª Cia / 1ª Fra" e "BBM 3 / 3ª Cia / 1ª Fra" permanecem distintos
     return ' / '.join(partes)
 
 
 def extrair_recursos(df):
-    """Retorna lista ordenada de códigos de recursos únicos a partir da coluna 'Empenhos.recurso_codigo_prefixo'."""
+    """Retorna lista ordenada de códigos de recursos únicos."""
     if 'Empenhos.recurso_codigo_prefixo' not in df.columns:
         return []
     recursos = set()
@@ -294,7 +296,6 @@ def extrair_recursos(df):
         val_str = str(val).strip()
         if not val_str:
             continue
-        # Normaliza separadores: " / " vira ","
         val_str = val_str.replace(' / ', ',')
         if ',' in val_str:
             for item in val_str.split(','):
@@ -325,13 +326,21 @@ with st.sidebar:
         accept_multiple_files=True
     )
     
-    rec_filter = []  # Garante que a variável exista mesmo sem arquivos
+    rec_filter = []
 
     if uploaded_files:
         dfs = {}
         for file in uploaded_files:
-            df = load_data(file)
-            dfs[file.name] = df
+            try:
+                df = load_data(file)
+                dfs[file.name] = df
+            except Exception as e:
+                st.error(f"Erro ao carregar {file.name}: {e}")
+                continue
+        
+        if not dfs:
+            st.error("Nenhum arquivo pôde ser carregado.")
+            st.stop()
         
         combined_df = pd.concat(
             [df.assign(arquivo=name) for name, df in dfs.items()],
@@ -391,7 +400,6 @@ with st.sidebar:
         )
         classificacoes = sorted(df_filtro[coluna_classificacao].dropna().unique()) if coluna_classificacao else []
         unidades = sorted(df_filtro['Chamada_atendimentos.unidade_servico_nome'].dropna().unique()) if 'Chamada_atendimentos.unidade_servico_nome' in df_filtro.columns else []
-        # NOVO: filtro de recursos empenhados
         recursos_unicos = extrair_recursos(df_filtro)
 
         with st.expander("Filtros adicionais", expanded=True):
@@ -410,7 +418,6 @@ with st.sidebar:
             df_filtered = df_filtered[df_filtered[coluna_classificacao].isin(class_filter)]
         if uni_filter:
             df_filtered = df_filtered[df_filtered['Chamada_atendimentos.unidade_servico_nome'].isin(uni_filter)]
-        # Filtro por recursos empenhados
         if rec_filter:
             def has_selected_resource(val):
                 if pd.isna(val):
@@ -419,7 +426,6 @@ with st.sidebar:
                 return any(r in resources for r in rec_filter)
             df_filtered = df_filtered[df_filtered['Empenhos.recurso_codigo_prefixo'].apply(has_selected_resource)]
         
-        # Armazenar em session_state para uso após a sidebar
         st.session_state.df_filtered = df_filtered
     else:
         st.info("👈 Faça upload de um ou mais arquivos .xlsx ou .csv para começar a análise.")
@@ -472,15 +478,13 @@ col6.metric("📋 Classificação Mais Frequente", classificacao_top)
 st.divider()
 
 # ==========================
-# CÁLCULO DO TEMPO DE ATENDIMENTO (preparação dos dados)
+# CÁLCULO DO TEMPO DE ATENDIMENTO
 # ==========================
-# Garantir que a coluna data_hora_fim exista e seja datetime
 if 'data_hora_fim' not in df_filtered.columns:
     df_filtered['data_hora_fim'] = pd.NaT
 
 # Calcular tempo em minutos
 df_filtered['tempo_minutos'] = (df_filtered['data_hora_fim'] - df_filtered['data_hora']).dt.total_seconds() / 60
-# Remover tempos negativos ou nulos
 df_filtered = df_filtered[df_filtered['tempo_minutos'] >= 0]
 df_filtered['tempo_horas'] = df_filtered['tempo_minutos'] / 60
 
@@ -839,24 +843,21 @@ with tab4:
 with tab5:
     st.header("⏱️ Tempo de Atendimento")
     
-    # Filtrar registros com data_hora_fim disponível
     df_tempo = df_filtered.dropna(subset=['data_hora_fim']).copy()
     
     if df_tempo.empty:
         st.info("ℹ️ Nenhum registro com data/hora de classificação (fim) disponível para análise de tempo.")
     else:
-        # Remover tempos negativos (já feito globalmente) e outliers extremos (opcional)
         max_tempo = st.slider(
             "Filtrar tempo máximo (horas) para análise",
             min_value=1.0,
-            max_value=720.0,  # 30 dias
-            value=168.0,      # 7 dias
+            max_value=720.0,
+            value=168.0,
             step=1.0,
             help="Remover ocorrências com tempo acima deste limite para melhor visualização."
         )
         df_tempo_filtrado = df_tempo[df_tempo['tempo_horas'] <= max_tempo].copy()
         
-        # Métricas
         media = df_tempo_filtrado['tempo_horas'].mean()
         mediana = df_tempo_filtrado['tempo_horas'].median()
         maximo = df_tempo_filtrado['tempo_horas'].max()
@@ -873,9 +874,7 @@ with tab5:
         
         st.divider()
         
-        # Gráfico 1: Distribuição geral com destaque para > 24h
         st.subheader("Distribuição do Tempo de Atendimento (em horas)")
-        # Criar uma coluna para categorizar
         df_tempo_filtrado['categoria'] = np.where(df_tempo_filtrado['tempo_horas'] <= 24, 'Até 24h', 'Acima de 24h')
         
         fig1 = px.histogram(
@@ -891,7 +890,6 @@ with tab5:
         fig1.update_layout(legend_title_text='')
         st.plotly_chart(fig1, width='stretch')
         
-        # Gráfico 2: Apenas > 24h (em dias)
         df_acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].copy()
         if not df_acima_24h.empty:
             df_acima_24h['dias'] = np.ceil(df_acima_24h['tempo_horas'] / 24).astype(int)
@@ -907,7 +905,6 @@ with tab5:
         else:
             st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
         
-        # Tabela resumo por Classificação
         st.subheader("📋 Resumo por Classificação da Chamada")
         
         class_col = coluna_ou_none(df_tempo_filtrado,
@@ -917,7 +914,6 @@ with tab5:
             'classificacao'
         )
         if class_col:
-            # Agrupar por classificação
             df_class = df_tempo_filtrado.groupby(class_col).agg(
                 media_horas=('tempo_horas', 'mean'),
                 mediana_horas=('tempo_horas', 'median'),
@@ -926,7 +922,6 @@ with tab5:
                 maximo_horas=('tempo_horas', 'max')
             ).reset_index()
             
-            # Calcular percentual de atendimentos > 24h por classificação
             acima_24h = df_tempo_filtrado[df_tempo_filtrado['tempo_horas'] > 24].groupby(class_col).size()
             df_class['acima_24h'] = df_class[class_col].map(acima_24h).fillna(0).astype(int)
             df_class['perc_acima_24h'] = (df_class['acima_24h'] / df_class['contagem'] * 100).round(1)
@@ -934,7 +929,6 @@ with tab5:
         else:
             df_class = pd.DataFrame(columns=['classificacao', 'media_horas', 'mediana_horas', 'desvio_horas', 'contagem', 'maximo_horas', 'acima_24h', 'perc_acima_24h'])
         
-        # Filtro opcional: mínimo de registros
         min_registros = st.number_input(
             "Mínimo de registros por classificação para exibição",
             min_value=1,
@@ -948,10 +942,8 @@ with tab5:
         if df_class_filtrada.empty:
             st.info(f"Nenhuma classificação com pelo menos {min_registros} registros.")
         else:
-            # Ordenar por média decrescente
             df_class_filtrada = df_class_filtrada.sort_values('media_horas', ascending=False)
             
-            # Formatação para exibição
             tabela = df_class_filtrada.copy()
             tabela['media_horas'] = tabela['media_horas'].map(lambda x: f"{x:.2f}")
             tabela['mediana_horas'] = tabela['mediana_horas'].map(lambda x: f"{x:.2f}")
