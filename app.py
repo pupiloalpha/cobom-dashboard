@@ -9,7 +9,7 @@ from streamlit_folium import st_folium
 
 from data_loader import apply_filters, load_uploaded_data
 from utils.helpers import coluna_ou_none, extrair_bbm, extrair_fracao, extrair_recursos
-from visualizations import create_occurrence_map, plot_bar, plot_histogram, plot_line
+from visualizations import create_occurrence_map, plot_bar, plot_histogram, plot_line, plot_resource_concentration
 
 st.set_page_config(page_title="Dashboard COBOM-BH", layout="wide")
 st.markdown("""
@@ -145,6 +145,10 @@ with tab1:
     with right:
         if class_column:
             st.plotly_chart(plot_bar(counts(df_filtered, class_column), class_column, "count", "Top 10 Classificações", 10), width="stretch")
+    resource_concentration = plot_resource_concentration(df_filtered)
+    if resource_concentration is not None:
+        st.plotly_chart(resource_concentration, width="stretch")
+        st.caption("As barras mostram a quantidade de recursos em cada chamada ordenada. A linha indica quanto do total de recursos está concentrado nas chamadas do ranking.")
 
 with tab2:
     st.header("📈 Evolução e Projeção Temporal")
