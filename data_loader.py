@@ -11,6 +11,26 @@ from openpyxl import load_workbook
 
 from utils.helpers import COLUMN_MAPPING, normalize_column_names, parse_coordinate, parse_datetime_series
 
+XLSX_COLUMNS = [
+    "chamada_numero", "reds", "data_hora_criacao", "hora_criacao",
+    "Chamada_atendimentos.local_do_fato", "Chamada_atendimentos.local_latitude",
+    "Chamada_atendimentos.local_longitude", "Chamada_atendimentos.natureza_codigo",
+    "Chamada_atendimentos.natureza_descricao", "Chamada_atendimentos.unidade_servico_codigo",
+    "Chamada_atendimentos.unidade_servico_nome", "Empenhos.recurso_codigo_prefixo",
+    "Chamada_atendimentos.chamada_classificacao_descricao", "data_classificacao",
+    "hora_classificacao", "estado_chamada", "Chamada_atendimentos.local_municipio_id",
+    "Chamada_atendimentos.local_municipio_nome",
+]
+
+CSV_COLUMNS = [
+    "chamada_numero", "reds", "data_hora_criacao", "Chamada_atendimentos.local_do_fato",
+    "Chamada_atendimentos.local_latitude", "Chamada_atendimentos.local_longitude",
+    "Chamada_atendimentos.natureza_descricao", "Chamada_atendimentos.unidade_servico_nome",
+    "Empenhos.recurso_codigo_prefixo", "alerta", "destaque", "envolve_autoridade",
+    "Chamada_atendimentos.chamada_classificacao_descricao", "situacao",
+    "data_hora_situacao_atual", "evento_associado",
+]
+
 
 def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     """Le CSV ou XLSX usando o conteudo do upload, sem cachear o objeto recebido."""
@@ -18,7 +38,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     filename = uploaded_file.name.lower().strip()
     is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
-        return _normalize_fixed_schema(_read_excel_with_openpyxl(raw))
+        return _normalize_fixed_schema(_read_excel_with_openpyxl(raw), XLSX_COLUMNS)
 
     detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
@@ -29,40 +49,36 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
                 io.BytesIO(raw), sep=None, engine="python", encoding=encoding,
                 dtype=str, on_bad_lines="skip",
             )
-            return _normalize_fixed_schema(normalize_column_names(df))
+            return _normalize_fixed_schema(normalize_column_names(df), CSV_COLUMNS)
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
-    """Le planilhas Excel mesmo quando o cabecalho ocupa uma linha irregular."""
+    """Le o XLSX fixo por posicao, independentemente dos nomes dos cabecalhos."""
     try:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        known_headers = set(COLUMN_MAPPING) | {
-            "chamada_numero",
-            "Reds.reds_numero",
-            "chamada_data_inclusao",
-            "Chamada_atendimentos.local_do_fato",
-        }
         candidates = []
         for worksheet in workbook.worksheets:
             if not worksheet.max_row or not worksheet.max_column:
                 continue
             rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
-            header_index = max(
-                range(len(rows)),
-                key=lambda index: sum(
-                    str(value).strip() in known_headers for value in rows[index] if value is not None
-                ),
-                default=0,
+            first_data_index = next(
+                (index for index, row in enumerate(rows) if any(value is not None for value in row)),
+                None,
             )
-            header_score = sum(
-                str(value).strip() in known_headers
-                for value in rows[header_index]
-                if value is not None
-            )
-            candidates.append((header_score, worksheet, rows, header_index))
+            if first_data_index is not None:
+                header_index = max(
+                    range(len(rows)),
+                    key=lambda index: (
+                        sum(value is not None for value in rows[index]),
+                        -index,
+                    ),
+                    default=first_data_index,
+                )
+                header_score = sum(value is not None for value in rows[header_index])
+                candidates.append((header_score, worksheet, rows, header_index))
 
         if not candidates:
             return pd.DataFrame()
@@ -70,17 +86,19 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
         _, _, rows, header_index = max(candidates, key=lambda item: item[0])
         width = max((len(row) for row in rows), default=0)
         rows = [row + [None] * (width - len(row)) for row in rows]
-        header = [str(value).strip() if value is not None and str(value).strip() else f"coluna_{index + 1}"
-                  for index, value in enumerate(rows[header_index])]
         data = rows[header_index + 1:]
-        return pd.DataFrame(data, columns=header)
+        return pd.DataFrame(data).reindex(columns=range(len(XLSX_COLUMNS))).set_axis(XLSX_COLUMNS, axis=1)
     except Exception as error:
         raise ValueError(f"Excel nao pode ser lido: {error}") from error
 
 
-def _normalize_fixed_schema(df: pd.DataFrame) -> pd.DataFrame:
+def _normalize_fixed_schema(df: pd.DataFrame, fixed_columns: list[str]) -> pd.DataFrame:
     """Converte os campos especificos dos esquemas XLSX e CSV para o modelo comum."""
-    result = df.copy()
+    result = df.iloc[:, :len(fixed_columns)].copy()
+    if result.shape[1] < len(fixed_columns):
+        for index in range(result.shape[1], len(fixed_columns)):
+            result[index] = pd.NA
+    result.columns = fixed_columns
     aliases = {
         "Reds.reds_numero": "reds",
         "chamada_data_inclusao": "data_hora_criacao",
@@ -107,18 +125,19 @@ def _normalize_fixed_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
-    numeric = pd.to_numeric(
-        series.astype(str).str.replace(",", ".", regex=False), errors="coerce"
-    ).astype("float64")
+    text = series.astype("string").str.strip()
+    has_decimal = text.str.contains(r"[.,]", regex=True, na=False)
+    numeric = pd.to_numeric(text.str.replace(",", ".", regex=False), errors="coerce").astype("float64")
+    unformatted = numeric.abs().gt(max_abs) & ~has_decimal
+    if unformatted.any():
+        numeric.loc[unformatted] = numeric.loc[unformatted].map(
+            lambda value: value / 10 ** (len(str(abs(int(value)))) - 2)
+        )
     fallback = numeric.isna() & series.notna()
     if fallback.any():
         numeric.loc[fallback] = series.loc[fallback].map(
             lambda value: parse_coordinate(value, max_abs)
         )
-    malformed = numeric.abs().gt(max_abs)
-    while malformed.any():
-        numeric.loc[malformed] = numeric.loc[malformed] / 10
-        malformed = numeric.abs().gt(max_abs)
     return numeric.where(numeric.abs().le(max_abs))
 
 
