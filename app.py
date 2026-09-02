@@ -33,7 +33,7 @@ def counts(dataframe, column, name="count"):
 
 with st.sidebar:
     st.header("📂 Carregar Dados")
-    uploaded_files = st.file_uploader("Selecione um ou mais arquivos .xlsx ou .csv", type=["xlsx", "csv"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Selecione um ou mais arquivos .xlsx ou .csv", type=["xlsx", "xlsm", "xslx", "csv"], accept_multiple_files=True)
     if not uploaded_files:
         st.info("👈 Faça upload de um ou mais arquivos .xlsx ou .csv para começar a análise.")
         st.stop()

@@ -14,8 +14,9 @@ from utils.helpers import normalize_column_names, parse_coordinate, parse_dateti
 def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     """Le CSV ou XLSX usando o conteudo do upload, sem cachear o objeto recebido."""
     raw = uploaded_file.getvalue()
-    filename = uploaded_file.name.lower()
-    if filename.endswith(".xlsx"):
+    filename = uploaded_file.name.lower().strip()
+    is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
+    if is_excel:
         return normalize_column_names(pd.read_excel(io.BytesIO(raw), engine="openpyxl", dtype=str))
 
     detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
