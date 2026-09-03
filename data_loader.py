@@ -33,13 +33,45 @@ CSV_COLUMNS = [
 
 
 def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
-    """Le CSV ou XLSX a partir de bytes brutos."""
+    """Le CSV ou XLSX de forma de alta performance a partir de bytes brutos."""
     filename_clean = filename.lower().strip()
     is_excel = filename_clean.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
         return _normalize_excel_schema(_read_excel_with_openpyxl(raw))
 
-    detected = chardet.detect(raw[:100_000]).get("encoding") or "utf-8"
+    # Fast-path para CSV: inferencia rapida de separador e leitura via C engine
+    sample = raw[:4096]
+    semicolon_count = sample.count(b";")
+    comma_count = sample.count(b",")
+    tab_count = sample.count(b"\t")
+
+    if semicolon_count >= comma_count and semicolon_count >= tab_count:
+        fast_seps = [";", ",", "\t"]
+    elif tab_count > comma_count:
+        fast_seps = ["\t", ";", ","]
+    else:
+        fast_seps = [",", ";", "\t"]
+
+    fast_encodings = ["utf-8-sig", "latin-1", "utf-8", "cp1252"]
+
+    for sep in fast_seps:
+        for encoding in fast_encodings:
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(raw),
+                    sep=sep,
+                    encoding=encoding,
+                    dtype=str,
+                    on_bad_lines="skip",
+                    engine="c",
+                )
+                if df.shape[1] > 1:
+                    return normalize_column_names(df)
+            except Exception:
+                continue
+
+    # Fallback com chardet
+    detected = chardet.detect(raw[:20_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
     last_error = None
     for encoding in attempts:
@@ -60,7 +92,7 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
-    """Le a aba COBOM e identifica o cabecalho pelos nomes conhecidos."""
+    """Le a aba COBOM e identifica o cabecalho nos primeiros registros de forma rapida."""
     try:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         worksheet = next(
@@ -76,13 +108,18 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
             return pd.DataFrame()
 
         rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
+        if not rows:
+            return pd.DataFrame()
+
         known_headers = set(COLUMN_MAPPING) | set(XLSX_COLUMNS) | {
             "Reds.reds_numero",
             "chamada_data_inclusao",
             "chamada_hora_inclusao",
         }
+        # Avalia apenas as primeiras 25 linhas para localizar a linha de cabecalho
+        sample_range = range(min(25, len(rows)))
         header_index = max(
-            range(len(rows)),
+            sample_range,
             key=lambda index: sum(
                 str(value).strip() in known_headers
                 for value in rows[index]

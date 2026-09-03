@@ -1,7 +1,7 @@
 [project]
-name = "blank-app-template"
-version = "0.1.0"
-description = "A simple Streamlit app template."
+name = "cobom-dashboard"
+version = "0.2.0"
+description = "Dashboard interativo de analise operacional do COBOM-BH / CBMMG."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,5 +16,15 @@ dependencies = [
     "chardet>=5.1.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+]
+
 [tool.uv]
 package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
