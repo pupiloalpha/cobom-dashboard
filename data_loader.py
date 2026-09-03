@@ -32,11 +32,10 @@ CSV_COLUMNS = [
 ]
 
 
-def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
-    """Le CSV ou XLSX usando o conteudo do upload, sem cachear o objeto recebido."""
-    raw = uploaded_file.getvalue()
-    filename = uploaded_file.name.lower().strip()
-    is_excel = filename.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
+def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
+    """Le CSV ou XLSX a partir de bytes brutos."""
+    filename_clean = filename.lower().strip()
+    is_excel = filename_clean.endswith((".xlsx", ".xlsm", ".xslx")) or raw[:4] == b"PK\x03\x04"
     if is_excel:
         return _normalize_excel_schema(_read_excel_with_openpyxl(raw))
 
@@ -53,6 +52,11 @@ def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
+
+
+def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
+    """Le CSV ou XLSX usando o conteudo do upload."""
+    return read_raw_data(uploaded_file.getvalue(), uploaded_file.name)
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
@@ -246,8 +250,15 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+@st.cache_data(show_spinner=False)
+def load_raw_bytes_data(raw_bytes: bytes, filename: str) -> pd.DataFrame:
+    """Carrega e processa bytes brutos com cache pelo hash dos bytes do arquivo."""
+    return process_dataframe(read_raw_data(raw_bytes, filename))
+
+
 def load_uploaded_data(uploaded_file: Any) -> pd.DataFrame:
-    return process_dataframe(read_uploaded_file(uploaded_file))
+    """Wrapper para carregar arquivos enviados com cacheamento dos bytes."""
+    return load_raw_bytes_data(uploaded_file.getvalue(), uploaded_file.name)
 
 
 def _filters_key(filters: dict[str, Any]) -> tuple:

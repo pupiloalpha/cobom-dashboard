@@ -33,27 +33,48 @@ def counts(dataframe, column, name="count"):
 
 with st.sidebar:
     st.header("📂 Carregar Dados")
-    uploaded_files = st.file_uploader("Selecione um ou mais arquivos .xlsx ou .csv", type=["xlsx", "xlsm", "xslx", "csv"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Selecione um ou mais arquivos .xlsx ou .csv",
+        type=["xlsx", "xlsm", "xslx", "csv"],
+        accept_multiple_files=True,
+    )
     if not uploaded_files:
         st.info("👈 Faça upload de um ou mais arquivos .xlsx ou .csv para começar a análise.")
+        st.session_state.pop("cached_dataframes", None)
         st.stop()
 
-    dataframes = {}
-    with st.spinner("Carregando e processando arquivos..."):
-        for uploaded_file in uploaded_files:
-            try:
-                dataframe = load_uploaded_data(uploaded_file)
-                if not dataframe.empty:
-                    dataframes[uploaded_file.name] = dataframe
-                else:
-                    st.warning(f"⚠️ O arquivo {uploaded_file.name} não contém dados válidos.")
-            except Exception as error:
-                st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
+    if "cached_dataframes" not in st.session_state:
+        st.session_state["cached_dataframes"] = {}
+
+    current_files_map = {f.name: f for f in uploaded_files}
+    # Remover arquivos que o usuário desmarcou
+    removed_keys = [k for k in st.session_state["cached_dataframes"] if k not in current_files_map]
+    for k in removed_keys:
+        del st.session_state["cached_dataframes"][k]
+
+    # Processar apenas arquivos que ainda não estão em cache na sessão
+    new_files = [f for f in uploaded_files if f.name not in st.session_state["cached_dataframes"]]
+    if new_files:
+        with st.spinner(f"Carregando e processando {len(new_files)} arquivo(s)..."):
+            for uploaded_file in new_files:
+                try:
+                    dataframe = load_uploaded_data(uploaded_file)
+                    if not dataframe.empty:
+                        st.session_state["cached_dataframes"][uploaded_file.name] = dataframe
+                    else:
+                        st.warning(f"⚠️ O arquivo {uploaded_file.name} não contém dados válidos.")
+                except Exception as error:
+                    st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
+
+    dataframes = st.session_state["cached_dataframes"]
     if not dataframes:
         st.error("Nenhum arquivo pôde ser carregado.")
         st.stop()
 
-    combined = pd.concat([dataframe.assign(arquivo=name) for name, dataframe in dataframes.items()], ignore_index=True)
+    combined = pd.concat(
+        [dataframe.assign(arquivo=name) for name, dataframe in dataframes.items()],
+        ignore_index=True,
+    )
     st.success(f"✅ {len(dataframes)} arquivo(s) carregado(s) com sucesso!")
     st.header("🔍 Filtros")
     st.subheader("📅 Período")
@@ -82,12 +103,9 @@ with st.sidebar:
     if class_column:
         filter_dict[class_column] = class_filter
     df_filtered = apply_filters(source, filter_dict)
-    st.session_state["df_filtered"] = df_filtered
     st.download_button("⬇️ Baixar dados filtrados (CSV)", data=df_filtered.to_csv(index=False).encode("utf-8-sig"), file_name="cobom_dados_filtrados.csv", mime="text/csv")
 
-if "df_filtered" not in st.session_state:
-    st.stop()
-df_filtered = st.session_state["df_filtered"].copy()
+df_filtered = df_filtered.copy()
 
 # Cards de métricas
 number_calls = len(df_filtered)
