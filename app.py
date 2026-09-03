@@ -39,10 +39,46 @@ with st.sidebar:
         accept_multiple_files=True,
     )
     if not uploaded_files:
-        st.info("👈 Faça upload de um ou mais arquivos .xlsx ou .csv para começar a análise.")
         st.session_state.pop("cached_dataframes", None)
-        st.stop()
+        st.info("👈 Faça upload de um ou mais arquivos para começar.")
 
+if not uploaded_files:
+    st.info("👈 **Para começar, selecione ou arraste um ou mais arquivos (.xlsx ou .csv) na barra lateral.**")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        <div style="background-color: #f8f9fa; border-left: 4px solid #d62728; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+            <h4 style="margin-top: 0; color: #d62728;">📂 1. Importação</h4>
+            <p style="margin-bottom: 0; font-size: 0.95rem;">Carregue múltiplos arquivos CSV ou Excel. O sistema padroniza datas, coordenadas e municípios automaticamente.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown("""
+        <div style="background-color: #f8f9fa; border-left: 4px solid #1f77b4; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+            <h4 style="margin-top: 0; color: #1f77b4;">🔍 2. Filtros Dinâmicos</h4>
+            <p style="margin-bottom: 0; font-size: 0.95rem;">Refine os dados por período, município, natureza da ocorrência, classificação e viaturas empenhadas.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown("""
+        <div style="background-color: #f8f9fa; border-left: 4px solid #2ca02c; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+            <h4 style="margin-top: 0; color: #2ca02c;">📊 3. Análise & Mapas</h4>
+            <p style="margin-bottom: 0; font-size: 0.95rem;">Acesse rankings, projeção temporal para 6 meses, análise de viaturas, mapa geográfico e tempos de atendimento.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("ℹ️ Detalhes dos Formatos e Campos Suportados"):
+        st.markdown("""
+        A aplicação reconhece exportações de relatórios do **COBOM-BH** com os seguintes campos principais:
+        - **Identificação**: `chamada_numero`, `reds`
+        - **Temporal**: `data_hora_criacao` / `chamada_data_inclusao`, `data_hora_situacao_atual`
+        - **Localização**: `local_do_fato`, `local_latitude`, `local_longitude`
+        - **Operacional**: `natureza_descricao`, `unidade_servico_nome`, `recurso_codigo_prefixo`, `chamada_classificacao_descricao`
+        """)
+    st.stop()
+
+with st.sidebar:
     if "cached_dataframes" not in st.session_state:
         st.session_state["cached_dataframes"] = {}
 
@@ -66,16 +102,20 @@ with st.sidebar:
                 except Exception as error:
                     st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
 
-    dataframes = st.session_state["cached_dataframes"]
+    dataframes = st.session_state.get("cached_dataframes", {})
     if not dataframes:
         st.error("Nenhum arquivo pôde ser carregado.")
         st.stop()
+        combined = pd.DataFrame()
+    else:
+        combined = pd.concat(
+            [dataframe.assign(arquivo=name) for name, dataframe in dataframes.items()],
+            ignore_index=True,
+        )
+        st.success(f"✅ {len(dataframes)} arquivo(s) carregado(s) com sucesso!")
 
-    combined = pd.concat(
-        [dataframe.assign(arquivo=name) for name, dataframe in dataframes.items()],
-        ignore_index=True,
-    )
-    st.success(f"✅ {len(dataframes)} arquivo(s) carregado(s) com sucesso!")
+    if combined.empty:
+        st.stop()
     st.header("🔍 Filtros")
     st.subheader("📅 Período")
     available_dates = sorted(combined["chamada_data_inclusao"].dt.date.unique())
@@ -109,12 +149,12 @@ df_filtered = df_filtered.copy()
 
 # Cards de métricas
 number_calls = len(df_filtered)
-mean_daily = number_calls / max(1, df_filtered["chamada_data_inclusao"].dt.date.nunique())
-number_municipalities = df_filtered["Chamada_atendimentos.local_municipio_nome"].nunique()
+mean_daily = number_calls / max(1, df_filtered["chamada_data_inclusao"].dt.date.nunique()) if not df_filtered.empty else 0
+number_municipalities = df_filtered["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in df_filtered else 0
 bbm_series = df_filtered["Chamada_atendimentos.unidade_servico_nome"].map(extrair_bbm) if "Chamada_atendimentos.unidade_servico_nome" in df_filtered else pd.Series(dtype=str)
-unit_top = bbm_series.mode().iloc[0] if not bbm_series.empty else "N/A"
-nature_top = df_filtered["Chamada_atendimentos.natureza_descricao"].mode().iloc[0] if not df_filtered.empty and "Chamada_atendimentos.natureza_descricao" in df_filtered else "N/A"
-class_top = df_filtered[class_column].mode().iloc[0] if class_column and not df_filtered.empty and not df_filtered[class_column].mode().empty else "N/A"
+unit_top = bbm_series.mode().iloc[0] if not bbm_series.mode().empty else "N/A"
+nature_top = df_filtered["Chamada_atendimentos.natureza_descricao"].mode().iloc[0] if "Chamada_atendimentos.natureza_descricao" in df_filtered and not df_filtered["Chamada_atendimentos.natureza_descricao"].mode().empty else "N/A"
+class_top = df_filtered[class_column].mode().iloc[0] if class_column and not df_filtered[class_column].mode().empty else "N/A"
 metric_row = st.columns(3)
 metric_row[0].metric("📞 Total de Chamadas", f"{number_calls:,}")
 metric_row[1].metric("📊 Média Diária", f"{mean_daily:.1f}")
