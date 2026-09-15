@@ -1,3 +1,4 @@
+import hashlib
 import io
 
 import numpy as np
@@ -44,6 +45,8 @@ if "use_demo_data" not in st.session_state:
 
 if "cached_dataframes" not in st.session_state:
     st.session_state["cached_dataframes"] = {}
+if "cached_file_signatures" not in st.session_state:
+    st.session_state["cached_file_signatures"] = {}
 
 with st.sidebar:
     st.header("📂 Carregar Dados")
@@ -57,12 +60,14 @@ with st.sidebar:
         st.session_state["use_demo_data"] = False
     elif not st.session_state["use_demo_data"]:
         st.session_state["cached_dataframes"] = {}
+        st.session_state["cached_file_signatures"] = {}
 
     if not uploaded_files:
         if st.session_state["use_demo_data"]:
             if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
                 st.session_state["use_demo_data"] = False
                 st.session_state["cached_dataframes"] = {}
+                st.session_state["cached_file_signatures"] = {}
                 st.rerun()
             st.info("ℹ️ Exibindo conjunto de **Dados de Demonstração (Demo CBMMG)**.")
         else:
@@ -141,13 +146,21 @@ if not uploaded_files and not st.session_state["use_demo_data"]:
 with st.sidebar:
     if uploaded_files:
         current_files_map = {f.name: f for f in uploaded_files}
+        current_file_signatures = {
+            name: hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+            for name, uploaded_file in current_files_map.items()
+        }
         # Remover arquivos que o usuário desmarcou
         removed_keys = [k for k in st.session_state["cached_dataframes"] if k not in current_files_map]
         for k in removed_keys:
             del st.session_state["cached_dataframes"][k]
+            st.session_state["cached_file_signatures"].pop(k, None)
 
-        # Processar apenas arquivos que ainda não estão em cache na sessão
-        new_files = [f for f in uploaded_files if f.name not in st.session_state["cached_dataframes"]]
+        # Reprocessar também quando o conteúdo muda mantendo o mesmo nome.
+        new_files = [
+            f for f in uploaded_files
+            if st.session_state["cached_file_signatures"].get(f.name) != current_file_signatures[f.name]
+        ]
         if new_files:
             with st.spinner(f"Carregando e processando {len(new_files)} arquivo(s)..."):
                 for uploaded_file in new_files:
@@ -155,6 +168,7 @@ with st.sidebar:
                         dataframe = load_uploaded_data(uploaded_file)
                         if not dataframe.empty:
                             st.session_state["cached_dataframes"][uploaded_file.name] = dataframe
+                            st.session_state["cached_file_signatures"][uploaded_file.name] = current_file_signatures[uploaded_file.name]
                         else:
                             st.warning(f"⚠️ O arquivo {uploaded_file.name} não contém dados válidos.")
                     except Exception as error:
@@ -441,7 +455,8 @@ with tab5:
     if time_data.empty:
         st.info("ℹ️ Nenhum registro com data/hora de encerramento disponível para análise de tempo.")
     else:
-        max_time = st.slider("Filtrar tempo máximo (horas) para análise", 1.0, 720.0, 168.0, 1.0, help="Remover ocorrências com tempo acima deste limite para melhor visualização.")
+        max_time_limit = max(720.0, float(np.ceil(time_data.tempo_horas.max())))
+        max_time = st.slider("Filtrar tempo máximo (horas) para análise", 1.0, max_time_limit, max_time_limit, 1.0, help="Remover ocorrências com tempo acima deste limite para melhor visualização.")
         time_data = time_data[time_data.tempo_horas <= max_time].copy()
         average, median, maximum = time_data.tempo_horas.mean(), time_data.tempo_horas.median(), time_data.tempo_horas.max()
         over_day = (time_data.tempo_horas > 24).sum()
@@ -482,14 +497,23 @@ with tab5:
             st.info("Nenhuma ocorrência com tempo superior a 24 horas.")
         st.subheader("📋 Resumo por Classificação da Chamada")
         if class_column:
-            summary = time_data.groupby(class_column).agg(
+            summary_data = time_data.copy()
+            summary_data["classificacao_exibicao"] = summary_data[class_column].astype("string").str.strip()
+            if "situacao" in summary_data.columns:
+                status_labels = summary_data["situacao"].astype("string").str.strip()
+                summary_data["classificacao_exibicao"] = summary_data["classificacao_exibicao"].mask(
+                    summary_data["classificacao_exibicao"].isna()
+                    | summary_data["classificacao_exibicao"].eq(""),
+                    status_labels,
+                )
+            summary = summary_data.groupby("classificacao_exibicao").agg(
                 media_horas=("tempo_horas", "mean"),
                 mediana_horas=("tempo_horas", "median"),
                 desvio_horas=("tempo_horas", "std"),
                 contagem=("tempo_horas", "count"),
                 maximo_horas=("tempo_horas", "max"),
             ).reset_index()
-            summary["acima_24h"] = time_data[class_column].where(time_data.tempo_horas > 24).value_counts().reindex(summary[class_column]).fillna(0).to_numpy().astype(int)
+            summary["acima_24h"] = summary_data["classificacao_exibicao"].where(summary_data.tempo_horas > 24).value_counts().reindex(summary["classificacao_exibicao"]).fillna(0).to_numpy().astype(int)
             summary["perc_acima_24h"] = (summary.acima_24h / summary.contagem * 100).round(1)
         else:
             summary = pd.DataFrame(columns=["Classificação da Chamada", "contagem"])
@@ -504,7 +528,7 @@ with tab5:
             summary["perc_acima_24h"] = summary.perc_acima_24h.map(lambda value: f"{value:.1f}%")
             st.dataframe(
                 summary.rename(columns={
-                    class_column: "Classificação da Chamada",
+                    "classificacao_exibicao": "Classificação da Chamada",
                     "media_horas": "Média (h)",
                     "mediana_horas": "Mediana (h)",
                     "desvio_horas": "Desvio Padrão (h)",
