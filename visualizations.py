@@ -212,6 +212,160 @@ def plot_hourly_weekday_heatmap(df: pd.DataFrame):
     return _apply_theme_layout(fig)
 
 
+def plot_situacao_operacional(df: pd.DataFrame):
+    """Distribuição das situações operacionais (útil para ativas)."""
+    if "situacao_norm" not in df.columns:
+        return None
+    base = (
+        df["situacao_norm"].dropna().astype(str).str.strip()
+        .value_counts().rename_axis("situacao").reset_index(name="chamadas")
+    )
+    if base.empty:
+        return None
+    fig = px.pie(
+        base, names="situacao", values="chamadas",
+        title="Distribuição por Situação Operacional",
+        hole=0.45,
+    )
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    return _apply_theme_layout(fig)
+
+
+def plot_flags_overview(df: pd.DataFrame):
+    """Comparativo das três flags operacionais (Alerta, Destaque, Autoridade)."""
+    registros = []
+    for col, rotulo in (
+        ("alerta_flag", "Alerta"),
+        ("destaque_flag", "Destaque"),
+        ("envolve_autoridade_flag", "Envolve Autoridade"),
+    ):
+        if col not in df.columns:
+            continue
+        serie = df[col].fillna(False).astype(bool)
+        registros.append({"categoria": rotulo, "tipo": "Sim", "chamadas": int(serie.sum())})
+        registros.append({"categoria": rotulo, "tipo": "Não", "chamadas": int((~serie).sum())})
+    if not registros:
+        return None
+    fig = px.bar(
+        pd.DataFrame(registros), x="categoria", y="chamadas", color="tipo",
+        barmode="group",
+        title="Sinalizações Operacionais (Alerta, Destaque, Autoridade)",
+        color_discrete_map={"Sim": "#d62728", "Não": "#9aa0a6"},
+    )
+    fig.update_layout(xaxis_title="", yaxis_title="Nº de Chamadas")
+    return _apply_theme_layout(fig)
+
+
+def plot_flags_temporal(df: pd.DataFrame, freq: str = "MS"):
+    """Evolução temporal das flags ativas (Alerta, Destaque, Autoridade)."""
+    if "chamada_data_inclusao" not in df.columns:
+        return None
+    flags = [c for c in ("alerta_flag", "destaque_flag", "envolve_autoridade_flag") if c in df.columns]
+    if not flags:
+        return None
+    base = df.set_index("chamada_data_inclusao")[flags].resample(freq).sum().reset_index()
+    melted = base.melt(id_vars="chamada_data_inclusao", var_name="flag", value_name="chamadas")
+    rotulos = {
+        "alerta_flag": "Alerta",
+        "destaque_flag": "Destaque",
+        "envolve_autoridade_flag": "Envolve Autoridade",
+    }
+    melted["flag"] = melted["flag"].map(rotulos)
+    fig = px.line(
+        melted, x="chamada_data_inclusao", y="chamadas", color="flag",
+        title="Evolução Temporal das Sinalizações Operacionais", markers=True,
+    )
+    fig.update_layout(xaxis_title="Período", yaxis_title="Nº de Chamadas")
+    return _apply_theme_layout(fig)
+
+
+def plot_natureza_grupos(df: pd.DataFrame):
+    """Ranking por grupo temático da natureza (APH, incêndio, salvamento...)."""
+    if "natureza_grupo" not in df.columns:
+        return None
+    base = (
+        df["natureza_grupo"].dropna()
+        .value_counts().rename_axis("grupo").reset_index(name="chamadas")
+    )
+    if base.empty:
+        return None
+    fig = px.bar(
+        base, x="chamadas", y="grupo", orientation="h",
+        title="Chamadas por Grupo Temático de Natureza",
+        color="chamadas", color_continuous_scale="Reds",
+    )
+    fig.update_layout(
+        yaxis_title="", xaxis_title="Nº de Chamadas",
+        coloraxis_showscale=False,
+    )
+    fig.update_yaxes(categoryorder="total ascending")
+    return _apply_theme_layout(fig)
+
+
+def plot_prioridade(df: pd.DataFrame):
+    """Distribuição por prioridade da natureza (1, 2, 3)."""
+    if "natureza_prioridade" not in df.columns:
+        return None
+    base = (
+        df["natureza_prioridade"].dropna().astype(int)
+        .value_counts().sort_index()
+        .rename_axis("prioridade").reset_index(name="chamadas")
+    )
+    if base.empty:
+        return None
+    mapa = {1: "1 - Alta", 2: "2 - Média", 3: "3 - Baixa"}
+    base["prioridade"] = base["prioridade"].map(mapa)
+    fig = px.bar(
+        base, x="prioridade", y="chamadas", color="prioridade",
+        title="Distribuição por Prioridade da Ocorrência",
+        color_discrete_map={
+            "1 - Alta": "#d62728",
+            "2 - Média": "#ff9800",
+            "3 - Baixa": "#4caf50",
+        },
+    )
+    fig.update_layout(xaxis_title="", yaxis_title="Nº de Chamadas", showlegend=False)
+    return _apply_theme_layout(fig)
+
+
+def plot_reds_origem(df: pd.DataFrame):
+    """Distribuição por origem do REDS (PM, BM, multiagência)."""
+    if "reds_origem" not in df.columns:
+        return None
+    base = (
+        df["reds_origem"].fillna("Sem REDS")
+        .value_counts().rename_axis("origem").reset_index(name="chamadas")
+    )
+    if base.empty:
+        return None
+    fig = px.pie(
+        base, names="origem", values="chamadas",
+        title="Origem do REDS (Agência Solicitante)", hole=0.45,
+    )
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    return _apply_theme_layout(fig)
+
+
+def plot_tempo_por_situacao(df: pd.DataFrame, min_registros: int = 3):
+    """Boxplot do tempo decorrido por situação (SLA por estado operacional)."""
+    if "situacao_norm" not in df.columns or "tempo_no_estado_horas" not in df.columns:
+        return None
+    validos = df.dropna(subset=["situacao_norm", "tempo_no_estado_horas"]).copy()
+    if validos.empty:
+        return None
+    contagem = validos["situacao_norm"].value_counts()
+    validos = validos[validos["situacao_norm"].isin(contagem[contagem >= min_registros].index)]
+    if validos.empty:
+        return None
+    fig = px.box(
+        validos, x="situacao_norm", y="tempo_no_estado_horas",
+        title="Tempo no Estado Atual por Situação Operacional",
+        points="outliers",
+    )
+    fig.update_layout(xaxis_title="", yaxis_title="Tempo (horas)")
+    return _apply_theme_layout(fig)
+
+
 def create_occurrence_map(
     map_df: pd.DataFrame,
     sample_size: int,
@@ -252,7 +406,7 @@ def create_occurrence_map(
                 fill=True,
                 fill_opacity=0.65,
             ).add_to(map_view)
-    else:  # cluster
+    else:
         cluster = MarkerCluster().add_to(map_view)
         for _, row in selected.iterrows():
             municipality = safe_map_text(row.get("Chamada_atendimentos.local_municipio_nome"), "N/D")

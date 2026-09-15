@@ -9,7 +9,14 @@ import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
-from utils.helpers import COLUMN_MAPPING, normalize_column_names, parse_coordinate, parse_datetime_series
+from utils.helpers import (
+    COLUMN_MAPPING,
+    NATUREZA_GRUPOS,
+    SITUACOES_TERMINAIS,
+    normalize_column_names,
+    parse_coordinate,
+    parse_datetime_series,
+)
 
 XLSX_COLUMNS = [
     "chamada_numero", "reds", "data_hora_criacao", "hora_criacao",
@@ -39,7 +46,6 @@ def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
     if is_excel:
         return _normalize_excel_schema(_read_excel_with_openpyxl(raw))
 
-    # Fast-path para CSV: inferencia rapida de separador e leitura via C engine
     sample = raw[:4096]
     semicolon_count = sample.count(b";")
     comma_count = sample.count(b",")
@@ -70,7 +76,6 @@ def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
             except Exception:
                 continue
 
-    # Fallback com chardet
     detected = chardet.detect(raw[:20_000]).get("encoding") or "utf-8"
     attempts = list(dict.fromkeys([detected, "utf-8-sig", "utf-8", "cp1252", "latin-1"]))
     last_error = None
@@ -116,7 +121,6 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
             "chamada_data_inclusao",
             "chamada_hora_inclusao",
         }
-        # Avalia apenas as primeiras 25 linhas para localizar a linha de cabecalho
         sample_range = range(min(25, len(rows)))
         header_index = max(
             sample_range,
@@ -228,8 +232,6 @@ def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
     text = series.astype("string").str.strip()
     numeric = pd.to_numeric(text.str.replace(",", ".", regex=False), errors="coerce").astype("float64")
 
-    # Alguns exports removem o separador decimal e variam a quantidade de casas.
-    # Testa escalas decimais ate encontrar a primeira coordenada plausivel.
     integer_like = numeric.notna() & numeric.mod(1).eq(0)
     unformatted = numeric.abs().gt(max_abs) & (
         ~text.str.contains(r"[.,]", regex=True, na=False) | integer_like
@@ -248,6 +250,86 @@ def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
             lambda value: parse_coordinate(value, max_abs)
         )
     return numeric.where(numeric.abs().le(max_abs))
+
+
+def _enrich_situacao(result: pd.DataFrame) -> pd.DataFrame:
+    """Normaliza situacao, marca terminalidade e calcula tempo no estado."""
+    if "situacao" not in result.columns:
+        result["situacao_norm"] = pd.Series(pd.NA, index=result.index, dtype="string")
+        result["situacao_terminal"] = True
+        return result
+
+    sit = result["situacao"].astype("string").str.strip()
+    result["situacao_norm"] = sit
+    result["situacao_terminal"] = sit.str.casefold().isin(SITUACOES_TERMINAIS).fillna(True)
+
+    if "data_hora_fim" in result.columns and "data_hora" in result.columns:
+        delta = (result["data_hora_fim"] - result["data_hora"]).dt.total_seconds() / 3600
+        result["tempo_no_estado_horas"] = delta.clip(lower=0)
+    return result
+
+
+def _enrich_natureza(result: pd.DataFrame) -> pd.DataFrame:
+    """Extrai codigo, grupo tematico e prioridade da natureza."""
+    col = "Chamada_atendimentos.natureza_descricao"
+    if col not in result.columns:
+        result["natureza_codigo"] = pd.Series(pd.NA, index=result.index, dtype="string")
+        result["natureza_grupo_letra"] = pd.Series(pd.NA, index=result.index, dtype="string")
+        result["natureza_grupo"] = "📌 Outros"
+        result["natureza_prioridade"] = pd.Series(pd.NA, index=result.index, dtype="Int64")
+        return result
+
+    nat = result[col].astype("string")
+    result["natureza_codigo"] = nat.str.extract(r"^([A-Z]\d{5})", expand=False)
+    result["natureza_grupo_letra"] = result["natureza_codigo"].str[0]
+    result["natureza_grupo"] = (
+        result["natureza_grupo_letra"].map(NATUREZA_GRUPOS).fillna("📌 Outros")
+    )
+    result["natureza_prioridade"] = pd.to_numeric(
+        nat.str.extract(r"Prioridade:\s*(\d)", expand=False),
+        errors="coerce",
+    ).astype("Int64")
+    return result
+
+
+def _enrich_flags(result: pd.DataFrame) -> pd.DataFrame:
+    """Converte Alerta / Destaque / Envolve autoridade em booleano."""
+    for col in ("alerta", "destaque", "envolve_autoridade"):
+        flag_col = f"{col}_flag"
+        if col in result.columns:
+            result[flag_col] = (
+                result[col].astype("string").str.strip().str.casefold().eq("sim")
+            )
+        else:
+            result[flag_col] = False
+    return result
+
+
+def _enrich_reds(result: pd.DataFrame) -> pd.DataFrame:
+    """Decompoe Nº REDS: origem PM/BM, quantidade, multiagencia."""
+    if "reds" not in result.columns:
+        result["reds_qtd"] = pd.Series(0, index=result.index, dtype="Int64")
+        result["reds_pm"] = False
+        result["reds_bm"] = False
+        result["reds_multiagencia"] = False
+        result["reds_origem"] = "Sem REDS"
+        return result
+
+    reds = result["reds"].fillna("").astype("string")
+    result["reds_qtd"] = reds.str.count(r"\([PB]M\)").fillna(0).astype("Int64")
+    result["reds_pm"] = reds.str.contains(r"\(PM\)", regex=True, na=False)
+    result["reds_bm"] = reds.str.contains(r"\(BM\)", regex=True, na=False)
+    result["reds_multiagencia"] = result["reds_qtd"] > 1
+    result["reds_origem"] = np.select(
+        [
+            result["reds_pm"] & ~result["reds_bm"],
+            ~result["reds_pm"] & result["reds_bm"],
+            result["reds_pm"] & result["reds_bm"],
+        ],
+        ["Somente PM", "Somente BM", "PM + BM (multiagência)"],
+        default="Sem REDS",
+    )
+    return result
 
 
 def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,9 +368,17 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         else pd.Series(pd.NaT, index=result.index, dtype="datetime64[ns]")
     )
     if "situacao" in result.columns:
-        classified = result["situacao"].astype("string").str.strip().str.casefold().eq("classificada")
-        end_times = end_times.where(classified, pd.Timestamp.now().floor("s"))
+        situacao_norm = result["situacao"].astype("string").str.strip().str.casefold()
+        is_terminal = situacao_norm.isin(SITUACOES_TERMINAIS)
+        # Chamadas em andamento (nao-terminais) usam now() como referencia do decorrido.
+        end_times = end_times.where(is_terminal, pd.Timestamp.now().floor("s"))
     result["data_hora_fim"] = end_times
+
+    # Enriquecimentos derivados
+    result = _enrich_situacao(result)
+    result = _enrich_natureza(result)
+    result = _enrich_flags(result)
+    result = _enrich_reds(result)
     return result
 
 

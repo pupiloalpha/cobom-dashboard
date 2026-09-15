@@ -7,10 +7,16 @@ import numpy as np
 import pandas as pd
 
 
+# Mapeamento de cabecalhos do CAD para nomes internos.
+# Inclui aliases para o cabecalho com mojibake (encoding corrompido)
+# que aparece em alguns exports (ex.: "Nş chamada", "Situaçăo").
 COLUMN_MAPPING = {
     "Nº chamada": "chamada_numero",
+    "Nş chamada": "chamada_numero",
     "Nº REDS": "reds",
+    "Nş REDS": "reds",
     "Data/hora de criação": "data_hora_criacao",
+    "Data/hora de criaçăo": "data_hora_criacao",
     "Local do fato": "Chamada_atendimentos.local_do_fato",
     "Latitude  do local": "Chamada_atendimentos.local_latitude",
     "Longitude do local": "Chamada_atendimentos.local_longitude",
@@ -21,9 +27,62 @@ COLUMN_MAPPING = {
     "Destaque": "destaque",
     "Envolve autoridade": "envolve_autoridade",
     "Tipo de classificação": "Chamada_atendimentos.chamada_classificacao_descricao",
+    "Tipo de classificaçăo": "Chamada_atendimentos.chamada_classificacao_descricao",
     "Situação": "situacao",
+    "Situaçăo": "situacao",
     "Data/hora da situação atual": "data_hora_situacao_atual",
+    "Data/hora da situaçăo atual": "data_hora_situacao_atual",
     "Evento associado": "evento_associado",
+}
+
+
+# Grupos tematicos derivados do primeiro caractere do codigo da natureza.
+NATUREZA_GRUPOS = {
+    "V": "🚑 APH / Vítimas",
+    "O": "🔥 Incêndios / Queimadas",
+    "S": "🆘 Salvamentos",
+    "W": "🛡️ Apoio / Preventivas",
+    "P": "⚠️ Perigos / Vistorias",
+    "X": "📋 Empenho Administrativo",
+    "Y": "🚁 Aéreas / Apoio a Órgãos",
+    "Q": "🎓 Treinamento / Palestras",
+    "R": "🤝 Ações Comunitárias / Risco",
+    "A": "💔 Autoextermínio",
+    "B": "🏗️ Brigada / Apoio Especial",
+}
+
+
+# Situacoes que representam encerramento do ciclo operacional.
+# Chamadas fora desta lista sao tratadas como "em andamento" e usam now()
+# como referencia para o tempo decorrido.
+SITUACOES_TERMINAIS = {
+    "classificada",
+    "terminada",
+    "suspensa",
+    "nada constatado",
+    "cancelada pelo coordenador do cobom",
+    "cancelada por ordem do orgao de coordenacao e controle",
+    "atribuída ao órgão",
+    "atribuida ao orgao",
+    "duplicada",
+    "dispensada pelo solicitante",
+    "solicitante não encontrado",
+    "solicitante nao encontrado",
+    "nao atendida: falta de viatura",
+    "nao atendida: falta de efetivo",
+    "não atendida: falta de viatura",
+    "não atendida: falta de efetivo",
+    "atendida pelo samu",
+    "repassada a outros orgaos",
+    "repassada a outros órgãos",
+    "ocorrências típicas de bombeiros atendida por outros órgãos",
+    "ocorrencias tipicas de bombeiros atendida por outros orgaos",
+    "orientação",
+    "orientacao",
+    "orientação da regulação médica",
+    "orientacao da regulacao medica",
+    "teste",
+    "rat",
 }
 
 
@@ -31,7 +90,11 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """Retorna uma copia com nomes de colunas padronizados."""
     result = df.copy()
     result.columns = result.columns.astype(str).str.strip()
-    return result.rename(columns=COLUMN_MAPPING)
+    result = result.rename(columns=COLUMN_MAPPING)
+    # Remove colunas duplicadas geradas por aliases coincidentes
+    if result.columns.duplicated().any():
+        result = result.loc[:, ~result.columns.duplicated()]
+    return result
 
 
 def parse_coordinate(value: Any, max_abs: float) -> float:
@@ -115,3 +178,30 @@ def coluna_ou_none(df: pd.DataFrame, *names: str) -> str | None:
 def safe_map_text(value: Any, default: str = "N/A", max_len: int | None = None) -> str:
     text = default if pd.isna(value) else str(value)
     return text[:max_len] if max_len is not None else text
+
+
+def detect_file_type(df: pd.DataFrame, filename: str = "") -> str:
+    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro.
+
+    Estrategia:
+    1) Pelo nome do arquivo, se contiver pistas textuais.
+    2) Pela cardinalidade e conteudo da coluna `situacao`.
+    """
+    name = (filename or "").lower()
+    if "ativ" in name:
+        return "ativas"
+    if "classific" in name:
+        return "classificadas"
+
+    for col in ("situacao", "Situaçăo", "Situação", "Situaçăo"):
+        if col in df.columns:
+            valores = (
+                df[col].dropna().astype(str).str.strip().str.casefold().unique()
+            )
+            if len(valores) == 0:
+                continue
+            if len(valores) == 1 and valores[0] == "classificada":
+                return "classificadas"
+            if len(valores) > 1:
+                return "ativas"
+    return "generico"
