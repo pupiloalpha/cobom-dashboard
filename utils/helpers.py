@@ -7,9 +7,6 @@ import numpy as np
 import pandas as pd
 
 
-# Mapeamento de cabecalhos do CAD para nomes internos.
-# Inclui aliases para o cabecalho com mojibake (encoding corrompido)
-# que aparece em alguns exports (ex.: "Nş chamada", "Situaçăo").
 COLUMN_MAPPING = {
     "Nº chamada": "chamada_numero",
     "Nş chamada": "chamada_numero",
@@ -17,26 +14,48 @@ COLUMN_MAPPING = {
     "Nş REDS": "reds",
     "Data/hora de criação": "data_hora_criacao",
     "Data/hora de criaçăo": "data_hora_criacao",
+    "Data/hora de criacao": "data_hora_criacao",
     "Local do fato": "Chamada_atendimentos.local_do_fato",
     "Latitude  do local": "Chamada_atendimentos.local_latitude",
+    "Latitude do local": "Chamada_atendimentos.local_latitude",
     "Longitude do local": "Chamada_atendimentos.local_longitude",
     "Natureza": "Chamada_atendimentos.natureza_descricao",
     "Unidade Responsável": "Chamada_atendimentos.unidade_servico_nome",
+    "Unidade Responsavel": "Chamada_atendimentos.unidade_servico_nome",
     "Recursos empenhados": "Empenhos.recurso_codigo_prefixo",
     "Alerta": "alerta",
     "Destaque": "destaque",
     "Envolve autoridade": "envolve_autoridade",
     "Tipo de classificação": "Chamada_atendimentos.chamada_classificacao_descricao",
     "Tipo de classificaçăo": "Chamada_atendimentos.chamada_classificacao_descricao",
+    "Tipo de classificacao": "Chamada_atendimentos.chamada_classificacao_descricao",
     "Situação": "situacao",
     "Situaçăo": "situacao",
+    "Situacao": "situacao",
     "Data/hora da situação atual": "data_hora_situacao_atual",
     "Data/hora da situaçăo atual": "data_hora_situacao_atual",
+    "Data/hora da situacao atual": "data_hora_situacao_atual",
     "Evento associado": "evento_associado",
 }
 
+# Mapa de mojibake -> caracteres originais (aplicado como defesa em profundidade)
+_MOJIBAKE_MAP = str.maketrans({
+    "ş": "º", "Ş": "º",
+    "ă": "ã", "Ă": "Ã",
+    "Ŕ": "À", "ŕ": "à",
+    "Ę": "Ê", "ę": "ê",
+    "Ţ": "Ç", "ţ": "ç",
+    "´": "Ó", "ł": "õ",
+})
 
-# Grupos tematicos derivados do primeiro caractere do codigo da natureza.
+
+def fix_mojibake(text: Any) -> str:
+    """Reverte caracteres corrompidos por encoding mismatch em exports do CAD."""
+    if text is None:
+        return ""
+    return str(text).translate(_MOJIBAKE_MAP)
+
+
 NATUREZA_GRUPOS = {
     "V": "🚑 APH / Vítimas",
     "O": "🔥 Incêndios / Queimadas",
@@ -52,9 +71,8 @@ NATUREZA_GRUPOS = {
 }
 
 
-# Situacoes que representam encerramento do ciclo operacional.
-# Chamadas fora desta lista sao tratadas como "em andamento" e usam now()
-# como referencia para o tempo decorrido.
+# Situacoes que encerram o ciclo operacional (nao recebem now() como data_hora_fim).
+# Valores em casefold. Comparacao e sempre casefold.
 SITUACOES_TERMINAIS = {
     "classificada",
     "terminada",
@@ -83,15 +101,23 @@ SITUACOES_TERMINAIS = {
     "orientacao da regulacao medica",
     "teste",
     "rat",
+    "cancelada por ordem do órgão de coordenação e controle",
 }
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Retorna uma copia com nomes de colunas padronizados."""
+    """Retorna copia com nomes de colunas padronizados (tolerante a mojibake)."""
     result = df.copy()
-    result.columns = result.columns.astype(str).str.strip()
-    result = result.rename(columns=COLUMN_MAPPING)
-    # Remove colunas duplicadas geradas por aliases coincidentes
+    original = result.columns.astype(str).str.strip()
+    # Tenta primeiro o mapeamento direto
+    mapped = pd.Index([COLUMN_MAPPING.get(c, c) for c in original])
+    # Se alguma coluna permaneceu "crua", tenta via fix_mojibake
+    unmapped = [i for i, c in enumerate(mapped) if c == original[i]]
+    if unmapped:
+        for i in unmapped:
+            fixed = fix_mojibake(original[i]).strip()
+            mapped = mapped.where(mapped != original[i], COLUMN_MAPPING.get(fixed, mapped[i]))
+    result.columns = mapped
     if result.columns.duplicated().any():
         result = result.loc[:, ~result.columns.duplicated()]
     return result
@@ -101,11 +127,9 @@ def parse_coordinate(value: Any, max_abs: float) -> float:
     """Converte coordenadas em formatos decimais brasileiros e exportados."""
     if pd.isna(value):
         return np.nan
-
     value_str = str(value).strip().replace(" ", "")
     if not value_str or value_str.lower() == "nan":
         return np.nan
-
     try:
         if value_str.count(".") > 1 and "," not in value_str:
             sign = "-" if value_str.startswith("-") else ""
@@ -122,7 +146,6 @@ def parse_coordinate(value: Any, max_abs: float) -> float:
             )
     except (TypeError, ValueError):
         return np.nan
-
     return parsed if abs(parsed) <= max_abs else np.nan
 
 
@@ -181,19 +204,14 @@ def safe_map_text(value: Any, default: str = "N/A", max_len: int | None = None) 
 
 
 def detect_file_type(df: pd.DataFrame, filename: str = "") -> str:
-    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro.
-
-    Estrategia:
-    1) Pelo nome do arquivo, se contiver pistas textuais.
-    2) Pela cardinalidade e conteudo da coluna `situacao`.
-    """
+    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro."""
     name = (filename or "").lower()
     if "ativ" in name:
         return "ativas"
     if "classific" in name:
         return "classificadas"
 
-    for col in ("situacao", "Situaçăo", "Situação", "Situaçăo"):
+    for col in ("situacao", "Situaçăo", "Situação", "Situacao"):
         if col in df.columns:
             valores = (
                 df[col].dropna().astype(str).str.strip().str.casefold().unique()

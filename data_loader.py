@@ -38,6 +38,18 @@ CSV_COLUMNS = [
     "data_hora_situacao_atual", "evento_associado",
 ]
 
+# Conjunto de nomes canônicos que indicam schema CSV já reconhecido por nome.
+_CSV_KNOWN_COLUMNS = set(CSV_COLUMNS) | {
+    "chamada_data_inclusao",
+    "chamada_hora_inclusao",
+    "data_classificacao",
+    "hora_classificacao",
+    "tipo_arquivo",
+    "arquivo",
+    "situacao_norm",
+    "situacao_terminal",
+}
+
 
 def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
     """Le CSV ou XLSX de forma de alta performance a partir de bytes brutos."""
@@ -72,7 +84,8 @@ def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
                     engine="c",
                 )
                 if df.shape[1] > 1:
-                    return normalize_column_names(df)
+                    # CORRECAO: aplica normalizacao por nome E fallback posicional
+                    return _normalize_csv_schema(df)
             except Exception:
                 continue
 
@@ -85,7 +98,7 @@ def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
                 io.BytesIO(raw), sep=None, engine="python", encoding=encoding,
                 dtype=str, on_bad_lines="skip",
             )
-            return normalize_column_names(df)
+            return _normalize_csv_schema(df)
         except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as error:
             last_error = error
     raise ValueError(f"CSV nao pode ser lido: {last_error}")
@@ -94,6 +107,25 @@ def read_raw_data(raw: bytes, filename: str) -> pd.DataFrame:
 def read_uploaded_file(uploaded_file: Any) -> pd.DataFrame:
     """Le CSV ou XLSX usando o conteudo do upload."""
     return read_raw_data(uploaded_file.getvalue(), uploaded_file.name)
+
+
+def _normalize_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia por nome quando possivel; caso contrario usa posicao (CSV_COLUMNS).
+
+    Resolve cabecalhos com mojibake (ex.: 'Nş chamada', 'Situaçăo') que nao
+    casam com o COLUMN_MAPPING. Como os exports CAD sempre mantem a mesma ordem
+    de colunas, o fallback posicional e seguro.
+    """
+    normalized = normalize_column_names(df)
+
+    # Se o mapeamento por nome funcionou (colunas canonicas presentes), usa.
+    if any(col in normalized.columns for col in _CSV_KNOWN_COLUMNS):
+        return normalized
+
+    # Fallback: reprocessa por posicao usando o esquema fixo do CSV.
+    raw = df.copy()
+    raw.columns = raw.columns.astype(str).str.strip()
+    return _normalize_fixed_schema(raw, CSV_COLUMNS)
 
 
 def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
@@ -257,15 +289,18 @@ def _enrich_situacao(result: pd.DataFrame) -> pd.DataFrame:
     if "situacao" not in result.columns:
         result["situacao_norm"] = pd.Series(pd.NA, index=result.index, dtype="string")
         result["situacao_terminal"] = True
+        result["tempo_no_estado_horas"] = pd.Series(pd.NA, index=result.index, dtype="float64")
         return result
 
     sit = result["situacao"].astype("string").str.strip()
     result["situacao_norm"] = sit
-    result["situacao_terminal"] = sit.str.casefold().isin(SITUACOES_TERMINAIS).fillna(True)
+    result["situacao_terminal"] = sit.str.casefold().isin(SITUACOES_TERMINAIS).fillna(False)
 
     if "data_hora_fim" in result.columns and "data_hora" in result.columns:
         delta = (result["data_hora_fim"] - result["data_hora"]).dt.total_seconds() / 3600
         result["tempo_no_estado_horas"] = delta.clip(lower=0)
+    else:
+        result["tempo_no_estado_horas"] = pd.Series(pd.NA, index=result.index, dtype="float64")
     return result
 
 
@@ -299,7 +334,7 @@ def _enrich_flags(result: pd.DataFrame) -> pd.DataFrame:
         if col in result.columns:
             result[flag_col] = (
                 result[col].astype("string").str.strip().str.casefold().eq("sim")
-            )
+            ).fillna(False)
         else:
             result[flag_col] = False
     return result
@@ -370,11 +405,9 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if "situacao" in result.columns:
         situacao_norm = result["situacao"].astype("string").str.strip().str.casefold()
         is_terminal = situacao_norm.isin(SITUACOES_TERMINAIS)
-        # Chamadas em andamento (nao-terminais) usam now() como referencia do decorrido.
         end_times = end_times.where(is_terminal, pd.Timestamp.now().floor("s"))
     result["data_hora_fim"] = end_times
 
-    # Enriquecimentos derivados
     result = _enrich_situacao(result)
     result = _enrich_natureza(result)
     result = _enrich_flags(result)

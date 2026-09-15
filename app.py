@@ -1,5 +1,4 @@
 import hashlib
-import io
 
 import numpy as np
 import pandas as pd
@@ -56,7 +55,6 @@ def counts(dataframe, column, name="contagem"):
 
 if "use_demo_data" not in st.session_state:
     st.session_state["use_demo_data"] = False
-
 if "cached_dataframes" not in st.session_state:
     st.session_state["cached_dataframes"] = {}
 if "cached_file_signatures" not in st.session_state:
@@ -211,9 +209,6 @@ with st.sidebar:
 
     st.header("🔍 Filtros")
 
-    # ---------------------------------------------------------------------
-    # Filtro por tipo de arquivo (classificadas / ativas / generico)
-    # ---------------------------------------------------------------------
     tipos_disponiveis = sorted(combined["tipo_arquivo"].dropna().unique().tolist())
     rotulos_tipo = {
         "classificadas": "✅ Classificadas",
@@ -258,7 +253,13 @@ with st.sidebar:
     municipality_column = "Chamada_atendimentos.local_municipio_nome"
     nature_column = "Chamada_atendimentos.natureza_descricao"
     unit_column = "Chamada_atendimentos.unidade_servico_nome"
-    class_column = coluna_ou_none(source, "Chamada_atendimentos.chamada_classificacao_descricao", "chamada_classificacao_descricao", "Classificacao", "classificacao")
+    class_column = coluna_ou_none(
+        source,
+        "Chamada_atendimentos.chamada_classificacao_descricao",
+        "chamada_classificacao_descricao",
+        "Classificacao",
+        "classificacao",
+    )
 
     with st.expander("Filtros adicionais (em cascata)", expanded=True):
         all_municipalities = sorted(source[municipality_column].dropna().unique()) if municipality_column in source else []
@@ -299,9 +300,7 @@ with st.sidebar:
 
 df_filtered = df_filtered.copy()
 
-# ---------------------------------------------------------------------------
-# Campos de tempo (usados na tab5 e tab6)
-# ---------------------------------------------------------------------------
+# Campos de tempo (tab5 e tab6)
 if "data_hora_fim" not in df_filtered:
     df_filtered["data_hora_fim"] = pd.NaT
 df_filtered["tempo_minutos"] = (df_filtered["data_hora_fim"] - df_filtered["data_hora"]).dt.total_seconds() / 60
@@ -310,9 +309,10 @@ df_filtered = df_filtered[
 ].copy()
 df_filtered["tempo_horas"] = df_filtered["tempo_minutos"] / 60
 
-# ---------------------------------------------------------------------------
+if "situacao_terminal" not in df_filtered.columns:
+    df_filtered["situacao_terminal"] = True
+
 # Cards de métricas gerais
-# ---------------------------------------------------------------------------
 number_calls = len(df_filtered)
 mean_daily = number_calls / max(1, df_filtered["chamada_data_inclusao"].dt.date.nunique()) if not df_filtered.empty else 0
 number_municipalities = df_filtered["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in df_filtered else 0
@@ -332,9 +332,6 @@ metric_row[1].metric("🔥 Natureza Mais Comum", nature_top)
 metric_row[2].metric("📋 Classificação Mais Frequente", class_top)
 st.divider()
 
-# ---------------------------------------------------------------------------
-# Abas
-# ---------------------------------------------------------------------------
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Rankings de Dados",
     "📈 Evolução e Projeção Temporal",
@@ -436,7 +433,7 @@ with tab2:
         projection = pd.concat([history, future, upper, lower], ignore_index=True)
         fig = plot_line(projection, "periodo_str", "chamadas", "tipo", "Projeção Operacional de Chamadas com Sazonalidade e Margem de Desvio")
         st.plotly_chart(fig, width="stretch")
-        st.caption("A projeção combina a tendência linear histórica com fatores multiplicativos de sazonalidade mensal (ex.: estiagem/queimadas e chuvas de verão).")
+        st.caption("A projeção combina a tendência linear histórica com fatores multiplicativos de sazonalidade mensal.")
     else:
         st.info("ℹ️ Dados insuficientes para realizar a projeção (mínimo 2 meses com ocorrências).")
     daily = df_filtered.groupby(df_filtered.chamada_data_inclusao.dt.date).size().rename("chamadas").reset_index(name="chamadas").rename(columns={"chamada_data_inclusao": "data"})
@@ -452,7 +449,7 @@ with tab3:
     heatmap_matrix = plot_hourly_weekday_heatmap(df_filtered)
     if heatmap_matrix is not None:
         st.plotly_chart(heatmap_matrix, width="stretch")
-        st.caption("A matriz cruza os 7 dias da semana com as 24 horas do dia para identificar horários de pico e orientar escalas de prontidão.")
+        st.caption("A matriz cruza os 7 dias da semana com as 24 horas do dia para identificar horários de pico.")
 
     st.divider()
     left, right = st.columns(2)
@@ -507,3 +504,299 @@ with tab4:
                     }[opt],
                     horizontal=True,
                 )
+            map_view, shown = create_occurrence_map(map_data, sample_size, mode_or_group=map_mode)
+            st_folium(map_view, width=1200, height=600)
+            st.caption(f"📊 Mostrando {shown:,} de {len(map_data):,} ocorrências com coordenadas válidas.")
+        else:
+            st.info("ℹ️ Nenhum dado com coordenadas disponíveis para exibir no mapa.")
+    else:
+        st.info("ℹ️ Colunas de latitude/longitude não encontradas nos dados.")
+
+# ===========================================================================
+# TAB 5 — Tempo de Atendimento (segmentado por terminal/aberto)
+# ===========================================================================
+with tab5:
+    st.header("⏱️ Tempo de Atendimento")
+    terminal_mask = df_filtered["situacao_terminal"].fillna(True).astype(bool)
+
+    metr_cols = st.columns(4)
+    metr_cols[0].metric("📞 Total", f"{len(df_filtered):,}")
+    metr_cols[1].metric("✅ Encerradas", f"{int(terminal_mask.sum()):,}")
+    metr_cols[2].metric("🟡 Em aberto", f"{int((~terminal_mask).sum()):,}")
+    delta_dias = (df_filtered["chamada_data_inclusao"].max() - df_filtered["chamada_data_inclusao"].min()).days + 1
+    metr_cols[3].metric("📅 Dias no recorte", f"{delta_dias}")
+
+    st.caption(
+        "Chamadas **em aberto** recebem `now()` como referência temporal; o valor exibido é "
+        "**tempo decorrido desde a criação**, não tempo de serviço."
+    )
+
+    modo = st.radio(
+        "Analisar:",
+        ["Encerradas (tempo real)", "Em aberto (tempo decorrido)", "Todas"],
+        horizontal=True,
+        key="tempo_modo",
+    )
+    if modo.startswith("Encerradas"):
+        time_data = df_filtered[terminal_mask].dropna(subset=["data_hora_fim"]).copy()
+    elif modo.startswith("Em aberto"):
+        time_data = df_filtered[~terminal_mask].dropna(subset=["data_hora_fim"]).copy()
+    else:
+        time_data = df_filtered.dropna(subset=["data_hora_fim"]).copy()
+
+    if time_data.empty:
+        st.info("ℹ️ Nenhum registro disponível para o modo selecionado.")
+    else:
+        max_time_limit = max(720.0, float(np.ceil(time_data.tempo_horas.max())))
+        max_time = st.slider("Filtrar tempo máximo (horas) para análise", 1.0, max_time_limit, max_time_limit, 1.0)
+        time_data = time_data[time_data.tempo_horas <= max_time].copy()
+
+        average, median, maximum = time_data.tempo_horas.mean(), time_data.tempo_horas.median(), time_data.tempo_horas.max()
+        over_day = (time_data.tempo_horas > 24).sum()
+        metrics = st.columns(5)
+        metrics[0].metric("📊 Média", f"{average:.2f} h")
+        metrics[1].metric("📊 Mediana", f"{median:.2f} h")
+        metrics[2].metric("📈 Máximo", f"{maximum:.2f} h")
+        metrics[3].metric("📋 Total de Registros", f"{len(time_data):,}")
+        metrics[4].metric("⏰ Duração > 24h", f"{over_day:,} ({over_day / len(time_data) * 100:.1f}%)")
+        st.divider()
+
+        st.subheader("Distribuição do Tempo (em horas)")
+        time_data["categoria"] = np.where(time_data.tempo_horas <= 24, "Até 24h", "Acima de 24h")
+        fig = plot_histogram(
+            time_data, "tempo_horas", "Histograma do Tempo",
+            color="categoria", nbins=50,
+            labels={"tempo_horas": "Tempo (horas)", "contagem": "Nº de Chamadas", "categoria": "Faixa"},
+            barmode="stack",
+        )
+        fig.update_layout(legend_title_text="Faixa de Duração")
+        st.plotly_chart(fig, width="stretch")
+
+        over_data = time_data[time_data.tempo_horas > 24].assign(dias=lambda data: np.ceil(data.tempo_horas / 24).astype(int))
+        if not over_data.empty:
+            st.plotly_chart(
+                plot_histogram(
+                    over_data, "dias", "Distribuição dos Atendimentos com Duração > 24h (em dias)",
+                    nbins=20, labels={"dias": "Duração (dias)", "contagem": "Nº de Chamadas"},
+                ),
+                width="stretch",
+            )
+
+        st.subheader("📋 Resumo por Classificação da Chamada")
+        if class_column:
+            summary_data = time_data.copy()
+            summary_data["classificacao_exibicao"] = summary_data[class_column].astype("string").str.strip()
+            if "situacao" in summary_data.columns:
+                status_labels = summary_data["situacao"].astype("string").str.strip()
+                summary_data["classificacao_exibicao"] = summary_data["classificacao_exibicao"].mask(
+                    summary_data["classificacao_exibicao"].isna() | summary_data["classificacao_exibicao"].eq(""),
+                    status_labels,
+                )
+            summary = summary_data.groupby("classificacao_exibicao").agg(
+                media_horas=("tempo_horas", "mean"),
+                mediana_horas=("tempo_horas", "median"),
+                desvio_horas=("tempo_horas", "std"),
+                contagem=("tempo_horas", "count"),
+                maximo_horas=("tempo_horas", "max"),
+            ).reset_index()
+            summary["acima_24h"] = summary_data["classificacao_exibicao"].where(summary_data.tempo_horas > 24).value_counts().reindex(summary["classificacao_exibicao"]).fillna(0).to_numpy().astype(int)
+            summary["perc_acima_24h"] = (summary.acima_24h / summary.contagem * 100).round(1)
+        else:
+            summary = pd.DataFrame(columns=["classificacao_exibicao", "contagem"])
+
+        minimum = st.number_input("Mínimo de registros por classificação", 1, 100, 5, 1, key="min_reg_class")
+        summary = summary[summary.contagem >= minimum].sort_values("media_horas", ascending=False) if "contagem" in summary and not summary.empty else summary
+        if summary.empty:
+            st.info(f"Nenhuma classificação com pelo menos {minimum} registros.")
+        else:
+            for column in ["media_horas", "mediana_horas", "maximo_horas"]:
+                summary[column] = summary[column].map(lambda value: f"{value:.2f}")
+            summary["desvio_horas"] = summary.desvio_horas.map(lambda value: f"{value:.2f}" if pd.notna(value) else "-")
+            summary["perc_acima_24h"] = summary.perc_acima_24h.map(lambda value: f"{value:.1f}%")
+            st.dataframe(
+                summary.rename(columns={
+                    "classificacao_exibicao": "Classificação da Chamada",
+                    "media_horas": "Média (h)",
+                    "mediana_horas": "Mediana (h)",
+                    "desvio_horas": "Desvio Padrão (h)",
+                    "contagem": "Nº de Chamadas",
+                    "maximo_horas": "Máximo (h)",
+                    "acima_24h": "Qtd > 24h",
+                    "perc_acima_24h": "% > 24h",
+                }),
+                width="stretch",
+                hide_index=True,
+            )
+
+        st.divider()
+        st.subheader("⏱️ Tempo por Situação Operacional")
+        fig = plot_tempo_por_situacao(df_filtered if modo == "Todas" else time_data, min_registros=3)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("Poucas situações distintas para gerar o boxplot.")
+
+# ===========================================================================
+# TAB 6 — Operacional (Ativas)
+# ===========================================================================
+with tab6:
+    st.header("🚨 Painel Operacional — Chamadas em Andamento")
+    if "situacao_terminal" not in df_filtered.columns:
+        st.info("Estrutura de situação não disponível neste recorte.")
+    else:
+        ativas = df_filtered[~df_filtered["situacao_terminal"].fillna(True).astype(bool)].copy()
+        if ativas.empty:
+            st.info("✅ Nenhuma chamada em andamento no recorte atual.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("🚨 Em andamento", f"{len(ativas):,}")
+            tmed = ativas["tempo_no_estado_horas"].mean() if "tempo_no_estado_horas" in ativas else np.nan
+            c2.metric("⏱️ Tempo médio decorrido", f"{tmed:.2f} h" if pd.notna(tmed) else "N/D")
+            mode_nat = ativas["Chamada_atendimentos.natureza_descricao"].mode() if "Chamada_atendimentos.natureza_descricao" in ativas else pd.Series(dtype=str)
+            c3.metric("🔥 Natureza dominante", (str(mode_nat.iloc[0])[:38] + "…") if not mode_nat.empty else "N/D")
+            c4.metric("📍 Municípios ativos", ativas["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in ativas else 0)
+
+            st.divider()
+            left, right = st.columns(2)
+            with left:
+                fig = plot_situacao_operacional(ativas)
+                if fig is not None:
+                    st.plotly_chart(fig, width="stretch")
+            with right:
+                fig = plot_tempo_por_situacao(ativas, min_registros=2)
+                if fig is not None:
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("Dados insuficientes para o boxplot por situação.")
+
+            st.subheader("⏱️ SLA de Chamadas em Aberto")
+            if "tempo_no_estado_horas" in ativas:
+                faixas = pd.cut(
+                    ativas["tempo_no_estado_horas"],
+                    bins=[-0.01, 1, 3, 6, 12, 24, np.inf],
+                    labels=["<1h", "1-3h", "3-6h", "6-12h", "12-24h", ">24h"],
+                )
+                dist = (
+                    faixas.value_counts()
+                    .reindex(["<1h", "1-3h", "3-6h", "6-12h", "12-24h", ">24h"])
+                    .rename_axis("faixa").reset_index(name="chamadas")
+                )
+                fig_sla = px.bar(
+                    dist, x="faixa", y="chamadas",
+                    title="Distribuição do Tempo Decorrido (SLA)",
+                    color="chamadas", color_continuous_scale="OrRd",
+                )
+                fig_sla.update_layout(
+                    xaxis_title="Faixa de tempo", yaxis_title="Nº de Chamadas",
+                    coloraxis_showscale=False,
+                )
+                st.plotly_chart(_apply_theme_layout(fig_sla), width="stretch")
+
+            st.subheader("📋 Chamadas em Andamento")
+            colunas_visiveis = [
+                "chamada_numero",
+                "Chamada_atendimentos.local_municipio_nome",
+                "Chamada_atendimentos.natureza_descricao",
+                "situacao_norm",
+                "tempo_no_estado_horas",
+                "Chamada_atendimentos.unidade_servico_nome",
+                "reds_origem",
+            ]
+            colunas_visiveis = [c for c in colunas_visiveis if c in ativas.columns]
+            tabela = ativas[colunas_visiveis].copy()
+            if "tempo_no_estado_horas" in tabela.columns:
+                tabela = tabela.sort_values("tempo_no_estado_horas", ascending=False)
+            st.dataframe(tabela, width="stretch", hide_index=True)
+
+            st.subheader("🗺️ Distribuição Geográfica das Chamadas Ativas")
+            lat, lon = "Chamada_atendimentos.local_latitude", "Chamada_atendimentos.local_longitude"
+            if lat in ativas.columns and lon in ativas.columns:
+                mapa_df = ativas.dropna(subset=[lat, lon])
+                if not mapa_df.empty:
+                    mapa, mostrados = create_occurrence_map(mapa_df, sample_size=len(mapa_df), mode_or_group="cluster")
+                    st_folium(mapa, width=1200, height=500)
+                    st.caption(f"Mostrando {mostrados:,} chamadas ativas com coordenadas válidas.")
+                else:
+                    st.info("Nenhuma chamada ativa com coordenadas disponíveis.")
+
+# ===========================================================================
+# TAB 7 — Flags, Agências e Natureza
+# ===========================================================================
+with tab7:
+    st.header("🏷️ Flags Operacionais, Agências e Categorias de Natureza")
+
+    st.subheader("🚩 Sinalizações Operacionais")
+    fig = plot_flags_overview(df_filtered)
+    if fig is not None:
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("Nenhuma das flags (Alerta, Destaque, Envolve autoridade) está disponível.")
+
+    left, right = st.columns(2)
+    with left:
+        meses_distintos = df_filtered["chamada_data_inclusao"].dt.to_period("M").nunique() if "chamada_data_inclusao" in df_filtered else 0
+        freq = "MS" if meses_distintos > 2 else "D"
+        fig = plot_flags_temporal(df_filtered, freq=freq)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
+    with right:
+        if "alerta_flag" in df_filtered.columns and "Chamada_atendimentos.local_municipio_nome" in df_filtered.columns:
+            top_alerta = (
+                df_filtered[df_filtered["alerta_flag"].fillna(False)]
+                ["Chamada_atendimentos.local_municipio_nome"]
+                .value_counts().head(10).rename_axis("municipio").reset_index(name="chamadas")
+            )
+            if not top_alerta.empty:
+                st.plotly_chart(plot_bar(top_alerta, "municipio", "chamadas", "Top 10 Municípios com Alerta"), width="stretch")
+            else:
+                st.info("Nenhuma chamada marcada com Alerta no recorte.")
+
+    st.divider()
+    st.subheader("🏢 Origem do REDS / Agências Solicitantes")
+    left, right = st.columns(2)
+    with left:
+        fig = plot_reds_origem(df_filtered)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
+    with right:
+        if "reds_multiagencia" in df_filtered.columns:
+            multi = df_filtered["reds_multiagencia"].fillna(False).astype(bool)
+            c1, c2 = st.columns(2)
+            c1.metric("🤝 Multiagência (PM+BM)", int(multi.sum()))
+            c2.metric("% do total", f"{multi.mean()*100:.1f}%")
+            if "natureza_grupo" in df_filtered.columns and multi.any():
+                cross = (
+                    df_filtered[multi]
+                    .groupby("natureza_grupo").size()
+                    .sort_values(ascending=False).head(8)
+                    .rename_axis("grupo").reset_index(name="chamadas")
+                )
+                if not cross.empty:
+                    st.plotly_chart(plot_bar(cross, "grupo", "chamadas", "Grupos com Mais Chamadas Multiagência"), width="stretch")
+
+    st.divider()
+    st.subheader("🧭 Natureza por Grupo Temático e Prioridade")
+    left, right = st.columns(2)
+    with left:
+        fig = plot_natureza_grupos(df_filtered)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
+    with right:
+        fig = plot_prioridade(df_filtered)
+        if fig is not None:
+            st.plotly_chart(fig, width="stretch")
+
+    if {"natureza_grupo", "natureza_prioridade"}.issubset(df_filtered.columns):
+        pivot = pd.pivot_table(
+            df_filtered,
+            index="natureza_grupo",
+            columns="natureza_prioridade",
+            values="chamada_numero",
+            aggfunc="count",
+            fill_value=0,
+        ).rename(columns={1: "Alta", 2: "Média", 3: "Baixa"})
+        st.subheader("📊 Natureza × Prioridade (contagem de chamadas)")
+        st.dataframe(pivot, width="stretch")
+
+st.markdown("---")
+st.caption("Dashboard desenvolvido com Streamlit | Corpo de Bombeiros Militar de Minas Gerais - COBOM-BH")
