@@ -38,14 +38,22 @@ COLUMN_MAPPING = {
     "Evento associado": "evento_associado",
 }
 
-# Mapa de mojibake -> caracteres originais (aplicado como defesa em profundidade)
+# Mapa de mojibake -> caracteres originais.
+# Ocorre quando o export e gerado em CP1252 e lido como UTF-8 (ou vice-versa),
+# transformando 'º'->'ş', 'ã'->'ă', 'Ã'->'Ă', 'Ç'->'Ţ', 'É'->'Ę', etc.
 _MOJIBAKE_MAP = str.maketrans({
-    "ş": "º", "Ş": "º",
-    "ă": "ã", "Ă": "Ã",
-    "Ŕ": "À", "ŕ": "à",
-    "Ę": "Ê", "ę": "ê",
-    "Ţ": "Ç", "ţ": "ç",
-    "´": "Ó", "ł": "õ",
+    "ş": "º",
+    "Ş": "º",
+    "ă": "ã",
+    "Ă": "Ã",
+    "Ŕ": "À",
+    "ŕ": "à",
+    "Ę": "Ê",
+    "ę": "ê",
+    "Ţ": "Ç",
+    "ţ": "ç",
+    "´": "Ó",
+    "ł": "õ",
 })
 
 
@@ -71,53 +79,41 @@ NATUREZA_GRUPOS = {
 }
 
 
-# Situacoes que encerram o ciclo operacional (nao recebem now() como data_hora_fim).
-# Valores em casefold. Comparacao e sempre casefold.
-SITUACOES_TERMINAIS = {
-    "classificada",
-    "terminada",
-    "suspensa",
-    "nada constatado",
-    "cancelada pelo coordenador do cobom",
-    "cancelada por ordem do orgao de coordenacao e controle",
-    "atribuída ao órgão",
-    "atribuida ao orgao",
-    "duplicada",
-    "dispensada pelo solicitante",
-    "solicitante não encontrado",
-    "solicitante nao encontrado",
-    "nao atendida: falta de viatura",
-    "nao atendida: falta de efetivo",
-    "não atendida: falta de viatura",
-    "não atendida: falta de efetivo",
-    "atendida pelo samu",
-    "repassada a outros orgaos",
-    "repassada a outros órgãos",
-    "ocorrências típicas de bombeiros atendida por outros órgãos",
-    "ocorrencias tipicas de bombeiros atendida por outros orgaos",
-    "orientação",
-    "orientacao",
-    "orientação da regulação médica",
-    "orientacao da regulacao medica",
-    "teste",
-    "rat",
-    "cancelada por ordem do órgão de coordenação e controle",
-}
+# Situacoes que ENCERRAM o ciclo operacional.
+#
+# IMPORTANTE: no CAD, APENAS "Classificada" retira a chamada da tela do
+# despachante. Todos os demais valores (Terminada, Atribuída ao órgão,
+# Em controle, Em direção, À caminho, No local, Despachada, Em retorno,
+# Suspensa, Nada constatado, Teste, RAT, Duplicada, Dispensada pelo
+# solicitante, Solicitante não encontrado, Não atendida: falta de viatura/
+# efetivo, Atendida pelo SAMU, Repassada a outros órgãos, Ocorrências
+# típicas de bombeiros atendida por outros órgãos, Orientação, Orientação
+# da regulação médica) mantêm a chamada ATIVA no sistema.
+#
+# Portanto: chamadas com qualquer situação diferente de "Classificada"
+# recebem now() como data_hora_fim e o tempo decorrido é exibido como
+# tempo de atendimento em andamento.
+SITUACOES_TERMINAIS = {"classificada"}
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Retorna copia com nomes de colunas padronizados (tolerante a mojibake)."""
+    """Padroniza nomes de colunas; tolerante a cabecalhos com mojibake.
+
+    Estrategia por coluna:
+    1. Tenta mapeamento direto em COLUMN_MAPPING.
+    2. Se nao casar, aplica fix_mojibake e tenta novamente.
+    3. Se ainda nao casar, mantem o nome (apenas com mojibake revertido).
+    """
     result = df.copy()
     original = result.columns.astype(str).str.strip()
-    # Tenta primeiro o mapeamento direto
-    mapped = pd.Index([COLUMN_MAPPING.get(c, c) for c in original])
-    # Se alguma coluna permaneceu "crua", tenta via fix_mojibake
-    unmapped = [i for i, c in enumerate(mapped) if c == original[i]]
-    if unmapped:
-        for i in unmapped:
-            fixed = fix_mojibake(original[i]).strip()
-            mapped = mapped.where(mapped != original[i], COLUMN_MAPPING.get(fixed, mapped[i]))
-    result.columns = mapped
+    mapped: list[str] = []
+    for col in original:
+        target = COLUMN_MAPPING.get(col)
+        if target is None:
+            fixed = fix_mojibake(col).strip()
+            target = COLUMN_MAPPING.get(fixed, fixed)
+        mapped.append(target)
+    result.columns = pd.Index(mapped)
     if result.columns.duplicated().any():
         result = result.loc[:, ~result.columns.duplicated()]
     return result
@@ -204,14 +200,21 @@ def safe_map_text(value: Any, default: str = "N/A", max_len: int | None = None) 
 
 
 def detect_file_type(df: pd.DataFrame, filename: str = "") -> str:
-    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro."""
+    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro.
+
+    Prioridade:
+    1) Nome do arquivo (contem 'ativ' ou 'classific').
+    2) Conteudo da coluna `situacao`: um unico valor == 'classificada' ->
+       'classificadas'; multiplos valores -> 'ativas'.
+    3) Fallback: 'generico'.
+    """
     name = (filename or "").lower()
     if "ativ" in name:
         return "ativas"
     if "classific" in name:
         return "classificadas"
 
-    for col in ("situacao", "Situaçăo", "Situação", "Situacao"):
+    for col in ("situacao", "Situaçăo", "Situação", "Situacao", "situaçăo"):
         if col in df.columns:
             valores = (
                 df[col].dropna().astype(str).str.strip().str.casefold().unique()

@@ -153,6 +153,7 @@ if not uploaded_files and not st.session_state["use_demo_data"]:
         - **Múltiplos Arquivos**: Você pode carregar mais de um arquivo CSV ou Excel simultaneamente. O painel unificará todos os registros em um único conjunto de dados.
         - **Padronização Automática**: Datas, horários, coordenadas, municípios e viaturas empenhadas são automaticamente processados e normalizados pelo sistema.
         - **Tipos de arquivo detectados**: `chamadas_classificadas` (base fechada) e `chamadas_ativas` (base operacional viva). O sistema identifica automaticamente e permite filtrar por tipo.
+        - **Situação terminal**: apenas o valor `Classificada` remove a chamada da tela do despachante. Todos os demais valores (Terminada, Atribuída ao órgão, Em controle, No local, etc.) mantêm a chamada ativa — o tempo de atendimento é medido em relação a **agora**.
         """)
     st.stop()
 
@@ -375,6 +376,8 @@ with tab1:
             resources = df_filtered["Empenhos.recurso_codigo_prefixo"].fillna("").astype(str).str.replace(" / ", ",", regex=False).str.split(",").explode().str.strip()
             st.plotly_chart(plot_bar(counts(resources.to_frame(name="prefixo"), "prefixo"), "prefixo", "contagem", "Top 15 Viaturas Mais Empenhadas", 15), width="stretch")
     with right:
+        # Ranking combinando classificacao e situacao (fallback quando
+        # classificacao esta vazia — caso tipico das chamadas ativas).
         if class_column:
             ranking_labels = df_filtered[class_column].astype("string").str.strip()
         else:
@@ -461,16 +464,37 @@ with tab3:
         st.plotly_chart(plot_bar(week, "dia", "chamadas", "Distribuição de Chamadas por Dia da Semana"), width="stretch")
     left, right = st.columns(2)
     with left:
+        # Pie combinando classificacao + situacao (fallback quando classificacao vazia).
         if class_column:
-            pie_fig = px.pie(
-                counts(df_filtered, class_column),
-                names=class_column,
-                values="contagem",
-                title="Distribuição por Classificação da Chamada",
-                labels={class_column: "Classificação", "contagem": "Nº de Chamadas"},
+            pie_series = df_filtered[class_column].astype("string").str.strip()
+        else:
+            pie_series = pd.Series(pd.NA, index=df_filtered.index, dtype="string")
+        if "situacao" in df_filtered.columns:
+            status_labels = df_filtered["situacao"].astype("string").str.strip()
+            pie_series = pie_series.mask(
+                pie_series.isna() | pie_series.eq(""), status_labels
             )
-            pie_fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        pie_data = (
+            pie_series.dropna()
+            .loc[lambda s: s.ne("")]
+            .value_counts()
+            .rename_axis("classificacao_situacao")
+            .reset_index(name="contagem")
+        )
+        if not pie_data.empty:
+            pie_fig = px.pie(
+                pie_data,
+                names="classificacao_situacao",
+                values="contagem",
+                title="Distribuição por Classificação / Situação da Chamada",
+            )
+            pie_fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
             st.plotly_chart(pie_fig, width="stretch")
+        else:
+            st.info("Sem dados de classificação ou situação para exibir.")
     with right:
         if unit_column in df_filtered:
             bbm_counts = counts(df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)), "bbm", "chamadas")
@@ -513,7 +537,7 @@ with tab4:
         st.info("ℹ️ Colunas de latitude/longitude não encontradas nos dados.")
 
 # ===========================================================================
-# TAB 5 — Tempo de Atendimento (segmentado por terminal/aberto)
+# TAB 5 — Tempo de Atendimento
 # ===========================================================================
 with tab5:
     st.header("⏱️ Tempo de Atendimento")
@@ -521,25 +545,27 @@ with tab5:
 
     metr_cols = st.columns(4)
     metr_cols[0].metric("📞 Total", f"{len(df_filtered):,}")
-    metr_cols[1].metric("✅ Encerradas", f"{int(terminal_mask.sum()):,}")
-    metr_cols[2].metric("🟡 Em aberto", f"{int((~terminal_mask).sum()):,}")
+    metr_cols[1].metric("✅ Classificadas (encerradas)", f"{int(terminal_mask.sum()):,}")
+    metr_cols[2].metric("🟡 Ativas (em andamento)", f"{int((~terminal_mask).sum()):,}")
     delta_dias = (df_filtered["chamada_data_inclusao"].max() - df_filtered["chamada_data_inclusao"].min()).days + 1
     metr_cols[3].metric("📅 Dias no recorte", f"{delta_dias}")
 
     st.caption(
-        "Chamadas **em aberto** recebem `now()` como referência temporal; o valor exibido é "
-        "**tempo decorrido desde a criação**, não tempo de serviço."
+        "Apenas chamadas com situação **Classificada** estão encerradas. Todas as outras "
+        "(Terminada, Atribuída ao órgão, Em controle, Em direção, À caminho, No local, "
+        "Despachada, Em retorno, Suspensa, etc.) continuam **ativas** — o tempo exibido é "
+        "**decorrido desde a criação até agora**."
     )
 
     modo = st.radio(
         "Analisar:",
-        ["Encerradas (tempo real)", "Em aberto (tempo decorrido)", "Todas"],
+        ["Classificadas (tempo real)", "Ativas (tempo decorrido)", "Todas"],
         horizontal=True,
         key="tempo_modo",
     )
-    if modo.startswith("Encerradas"):
+    if modo.startswith("Classificadas"):
         time_data = df_filtered[terminal_mask].dropna(subset=["data_hora_fim"]).copy()
-    elif modo.startswith("Em aberto"):
+    elif modo.startswith("Ativas"):
         time_data = df_filtered[~terminal_mask].dropna(subset=["data_hora_fim"]).copy()
     else:
         time_data = df_filtered.dropna(subset=["data_hora_fim"]).copy()
@@ -582,16 +608,22 @@ with tab5:
                 width="stretch",
             )
 
-        st.subheader("📋 Resumo por Classificação da Chamada")
+        st.subheader("📋 Resumo por Classificação / Situação da Chamada")
+        summary_data = time_data.copy()
         if class_column:
-            summary_data = time_data.copy()
             summary_data["classificacao_exibicao"] = summary_data[class_column].astype("string").str.strip()
-            if "situacao" in summary_data.columns:
-                status_labels = summary_data["situacao"].astype("string").str.strip()
-                summary_data["classificacao_exibicao"] = summary_data["classificacao_exibicao"].mask(
-                    summary_data["classificacao_exibicao"].isna() | summary_data["classificacao_exibicao"].eq(""),
-                    status_labels,
-                )
+        else:
+            summary_data["classificacao_exibicao"] = pd.Series(pd.NA, index=summary_data.index, dtype="string")
+        if "situacao" in summary_data.columns:
+            status_labels = summary_data["situacao"].astype("string").str.strip()
+            summary_data["classificacao_exibicao"] = summary_data["classificacao_exibicao"].mask(
+                summary_data["classificacao_exibicao"].isna() | summary_data["classificacao_exibicao"].eq(""),
+                status_labels,
+            )
+        summary_data = summary_data[summary_data["classificacao_exibicao"].notna() & summary_data["classificacao_exibicao"].ne("")]
+        if summary_data.empty:
+            summary = pd.DataFrame(columns=["classificacao_exibicao", "contagem"])
+        else:
             summary = summary_data.groupby("classificacao_exibicao").agg(
                 media_horas=("tempo_horas", "mean"),
                 mediana_horas=("tempo_horas", "median"),
@@ -601,8 +633,6 @@ with tab5:
             ).reset_index()
             summary["acima_24h"] = summary_data["classificacao_exibicao"].where(summary_data.tempo_horas > 24).value_counts().reindex(summary["classificacao_exibicao"]).fillna(0).to_numpy().astype(int)
             summary["perc_acima_24h"] = (summary.acima_24h / summary.contagem * 100).round(1)
-        else:
-            summary = pd.DataFrame(columns=["classificacao_exibicao", "contagem"])
 
         minimum = st.number_input("Mínimo de registros por classificação", 1, 100, 5, 1, key="min_reg_class")
         summary = summary[summary.contagem >= minimum].sort_values("media_horas", ascending=False) if "contagem" in summary and not summary.empty else summary
@@ -615,7 +645,7 @@ with tab5:
             summary["perc_acima_24h"] = summary.perc_acima_24h.map(lambda value: f"{value:.1f}%")
             st.dataframe(
                 summary.rename(columns={
-                    "classificacao_exibicao": "Classificação da Chamada",
+                    "classificacao_exibicao": "Classificação / Situação",
                     "media_horas": "Média (h)",
                     "mediana_horas": "Mediana (h)",
                     "desvio_horas": "Desvio Padrão (h)",
