@@ -306,7 +306,14 @@ with tab1:
             st.plotly_chart(plot_bar(counts(resources.to_frame(name="prefixo"), "prefixo"), "prefixo", "contagem", "Top 15 Viaturas Mais Empenhadas", 15), width="stretch")
     with right:
         if class_column:
-            st.plotly_chart(plot_bar(counts(df_filtered, class_column), class_column, "contagem", "Top 10 Classificações de Chamadas", 10), width="stretch")
+            ranking_labels = df_filtered[class_column].astype("string").str.strip()
+        else:
+            ranking_labels = pd.Series(pd.NA, index=df_filtered.index, dtype="string")
+        if "situacao" in df_filtered.columns:
+            status_labels = df_filtered["situacao"].astype("string").str.strip()
+            ranking_labels = ranking_labels.mask(ranking_labels.isna() | ranking_labels.eq(""), status_labels)
+        ranking_data = pd.DataFrame({"classificacao_ranking": ranking_labels})
+        st.plotly_chart(plot_bar(counts(ranking_data, "classificacao_ranking", "contagem"), "classificacao_ranking", "contagem", "Top 10 Classificações / Situações", 10), width="stretch")
     resource_concentration = plot_resource_concentration(df_filtered)
     if resource_concentration is not None:
         st.plotly_chart(resource_concentration, width="stretch")

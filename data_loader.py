@@ -280,10 +280,15 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         result["hora"] = (result["chamada_hora_inclusao"].dt.total_seconds() // 3600).astype("Int64")
         result["dia_semana"] = result["chamada_data_inclusao"].dt.dayofweek
 
-    if "data_hora_situacao_atual" in result.columns:
-        result["data_hora_fim"] = parse_datetime_series(result["data_hora_situacao_atual"])
-    else:
-        result["data_hora_fim"] = pd.NaT
+    end_times = (
+        parse_datetime_series(result["data_hora_situacao_atual"])
+        if "data_hora_situacao_atual" in result.columns
+        else pd.Series(pd.NaT, index=result.index, dtype="datetime64[ns]")
+    )
+    if "situacao" in result.columns:
+        classified = result["situacao"].astype("string").str.strip().str.casefold().eq("classificada")
+        end_times = end_times.where(classified, pd.Timestamp.now().floor("s"))
+    result["data_hora_fim"] = end_times
     return result
 
 
