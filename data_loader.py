@@ -98,6 +98,79 @@ _CSV_KNOWN_COLUMNS: set[str] = set(CSV_COLUMNS) | {
 }
 
 
+# >>> CORREÇÃO -----------------------------------------------------------------
+# Aliases adicionais aplicados localmente em data_loader, independentes de
+# helpers.COLUMN_MAPPING. Cobrem o arquivo "Mensal COBOM" do CAD, cujo cabeçalho
+# expõe "ESTADO_CHAMADA" em vez de "Situação". Sem isso, `situacao` nunca é
+# criada no fluxo XLSX e a lógica de terminalidade/ativas (abas 5 e 6) quebra.
+# ------------------------------------------------------------------------------
+_LOCAL_COLUMN_ALIASES: dict[str, str] = {
+    "ESTADO_CHAMADA": "situacao",
+    "Estado_chamada": "situacao",
+    "estado_chamada": "situacao",
+    "Estado Chamada": "situacao",
+    "Estado da Chamada": "situacao",
+    "ESTADO DA CHAMADA": "situacao",
+    "situaçăo": "situacao",
+    "Situaçăo": "situacao",
+    "situacao_chamada": "situacao",
+}
+
+
+def _apply_local_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Aplica aliases locais de colunas sem depender de `helpers.COLUMN_MAPPING`.
+
+    Não sobrescreve colunas já existentes com o nome canônico — só renomeia
+    se o alias estiver presente e o destino ainda não tiver sido criado.
+    """
+    rename_map: dict[str, str] = {}
+    existing = set(df.columns)
+    for source, target in _LOCAL_COLUMN_ALIASES.items():
+        if source in existing and target not in existing and source != target:
+            rename_map[source] = target
+    return df.rename(columns=rename_map) if rename_map else df
+
+
+# >>> CORREÇÃO -----------------------------------------------------------------
+# Wrapper seguro de parse_datetime_series: garante que a saída é SEMPRE
+# datetime64[ns] nativo do numpy (NaT em vez de pd.NA nullable). Evita que
+# resíduos de pd.NA se propaguem pelas etapas seguintes do pipeline e
+# estourem em chamadas como `.astype("float64")` ou `pd.to_timedelta`.
+# ------------------------------------------------------------------------------
+def _safe_datetime(series: pd.Series) -> pd.Series:
+    parsed = parse_datetime_series(series)
+    # Força numpy datetime64[ns] independente de dtype nullable de entrada.
+    try:
+        arr = parsed.to_numpy(dtype="datetime64[ns]", na_value=np.datetime64("NaT"))
+    except (TypeError, ValueError):
+        # Fallback: coage objeto por objeto.
+        arr = np.array(
+            [np.datetime64("NaT") if pd.isna(v) else np.datetime64(v) for v in parsed],
+            dtype="datetime64[ns]",
+        )
+    return pd.Series(arr, index=series.index)
+
+
+# >>> CORREÇÃO -----------------------------------------------------------------
+# Wrapper seguro de pd.to_timedelta para colunas hora (string vazia, pd.NA,
+# "HH:MM:SS", "NaT", etc.). Sem isso, o `pd.to_timedelta` reclama em alguns
+# pandas quando o array intermediário contém pd.NA.
+# ------------------------------------------------------------------------------
+def _safe_timedelta(series: pd.Series) -> pd.Series:
+    s = series.astype("string").str.strip()
+    # Normaliza vazios e nulos para NaN antes de converter.
+    s = s.where(s.ne("") & s.notna(), other=pd.NA)
+    td = pd.to_timedelta(s, errors="coerce")
+    try:
+        arr = td.to_numpy(dtype="timedelta64[ns]", na_value=np.timedelta64("NaT"))
+    except (TypeError, ValueError):
+        arr = np.array(
+            [np.timedelta64("NaT") if pd.isna(v) else np.timedelta64(v) for v in td],
+            dtype="timedelta64[ns]",
+        )
+    return pd.Series(arr, index=series.index)
+
+
 # ===========================================================================
 # LEITURA CRUA (bytes → DataFrame com schema normalizado)
 # ===========================================================================
@@ -212,7 +285,7 @@ def _normalize_csv_schema(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame normalizado.
     """
-    normalized = normalize_column_names(df)
+    normalized = _apply_local_aliases(normalize_column_names(df))
 
     # Se pelo menos uma coluna canônica apareceu, considera o mapeamento OK.
     if any(col in normalized.columns for col in _CSV_KNOWN_COLUMNS):
@@ -263,11 +336,18 @@ def _read_excel_with_openpyxl(raw: bytes) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame()
 
-        known_headers = set(COLUMN_MAPPING) | set(XLSX_COLUMNS) | {
-            "Reds.reds_numero",
-            "chamada_data_inclusao",
-            "chamada_hora_inclusao",
-        }
+        # >>> CORREÇÃO: incluir aliases locais no conjunto de cabeçalhos conhecidos
+        # para que "ESTADO_CHAMADA" seja reconhecida na pontuação do cabeçalho.
+        known_headers = (
+            set(COLUMN_MAPPING)
+            | set(XLSX_COLUMNS)
+            | set(_LOCAL_COLUMN_ALIASES)
+            | {
+                "Reds.reds_numero",
+                "chamada_data_inclusao",
+                "chamada_hora_inclusao",
+            }
+        )
 
         # Pontua cada linha pelo número de cabeçalhos conhecidos.
         sample_range = range(min(25, len(rows)))
@@ -314,12 +394,13 @@ def _normalize_excel_schema(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame com nomes canônicos e aliases resolvidos.
     """
-    normalized = normalize_column_names(df)
+    normalized = _apply_local_aliases(normalize_column_names(df))
     known_columns = set(XLSX_COLUMNS) | {
         "chamada_data_inclusao",
         "chamada_hora_inclusao",
         "Chamada_atendimentos.chamada_classificacao_data",
         "Chamada_atendimentos.chamada_classificacao_hora",
+        "situacao",  # >>> CORREÇÃO: reconhece alias "ESTADO_CHAMADA"
     }
     if any(column in normalized.columns for column in known_columns):
         return _normalize_fixed_schema_by_name(normalized)
@@ -354,20 +435,28 @@ def _normalize_fixed_schema_by_name(df: pd.DataFrame) -> pd.DataFrame:
         })
     if "data_hora_criacao" not in result.columns and "chamada_data_inclusao" in df.columns:
         result["data_hora_criacao"] = df["chamada_data_inclusao"]
+
+    # >>> CORREÇÃO: usa wrappers seguros para data/hora
     if {"data_hora_criacao", "hora_criacao"}.issubset(result.columns):
-        result["data_hora_criacao"] = parse_datetime_series(result["data_hora_criacao"])
-        result["data_hora_criacao"] = result["data_hora_criacao"] + pd.to_timedelta(
-            result["hora_criacao"].astype("string").str.strip(), errors="coerce"
+        result["data_hora_criacao"] = _safe_datetime(result["data_hora_criacao"])
+        result["data_hora_criacao"] = result["data_hora_criacao"] + _safe_timedelta(
+            result["hora_criacao"]
         )
 
     # Combina data + hora da situação atual.
     if "data_hora_situacao_atual" not in result.columns and {
         "data_classificacao", "hora_classificacao"
     }.issubset(result.columns):
-        result["data_hora_situacao_atual"] = parse_datetime_series(result["data_classificacao"])
-        result["data_hora_situacao_atual"] = result["data_hora_situacao_atual"] + pd.to_timedelta(
-            result["hora_classificacao"].astype("string").str.strip(), errors="coerce"
+        result["data_hora_situacao_atual"] = _safe_datetime(result["data_classificacao"])
+        result["data_hora_situacao_atual"] = result["data_hora_situacao_atual"] + _safe_timedelta(
+            result["hora_classificacao"]
         )
+
+    # >>> CORREÇÃO: normaliza data_hora_criacao que ficou sem combinar (caso
+    # o arquivo tenha vindo com data/hora já num único campo, formato string).
+    if "data_hora_criacao" in result.columns:
+        result["data_hora_criacao"] = _safe_datetime(result["data_hora_criacao"])
+
     return result
 
 
@@ -398,12 +487,14 @@ def _normalize_fixed_schema(df: pd.DataFrame, fixed_columns: list[str]) -> pd.Da
         "chamada_hora_inclusao": "hora_criacao",
         "Chamada_atendimentos.chamada_classificacao_data": "data_classificacao",
         "Chamada_atendimentos.chamada_classificacao_hora": "hora_classificacao",
+        "estado_chamada": "situacao",  # >>> CORREÇÃO
+        "ESTADO_CHAMADA": "situacao",  # >>> CORREÇÃO
     }
     result = result.rename(
         columns={s: t for s, t in aliases.items() if s in result}
     )
 
-    # Combina data + hora de criação.
+    # Combina data + hora de criação (com wrapper seguro).
     if "data_hora_criacao" in result.columns and "hora_criacao" in result.columns:
         result["data_hora_criacao"] = (
             result["data_hora_criacao"].astype("string").str.strip()
@@ -440,9 +531,41 @@ def _numeric_coordinates(series: pd.Series, max_abs: float) -> pd.Series:
         Série de floats dentro da faixa (ou ``NaN``).
     """
     text = series.astype("string").str.strip()
-    numeric = pd.to_numeric(
+    raw = pd.to_numeric(
         text.str.replace(",", ".", regex=False), errors="coerce"
-    ).astype("float64")
+    )
+
+    # >>> CORREÇÃO -----------------------------------------------------------------
+    # Alguns pandas devolvem dtype "object" contendo pd.NA quando a coluna de
+    # entrada tem dtype "string" (nullable) e há valores nulos. Nesse caso,
+    # `raw.astype("float64")` chama `float(pd.NA)` internamente e estoura:
+    #   "float() argument must be a string or a real number, not 'NAType'"
+    # Aqui forçamos a conversão via numpy float64 nativo, mapeando pd.NA → NaN.
+    # ------------------------------------------------------------------------------
+    try:
+        numeric = raw.astype("float64")
+    except (TypeError, ValueError):
+        numeric = pd.Series(
+            np.where(pd.isna(raw), np.nan, raw).astype("float64"),
+            index=series.index,
+        )
+
+    # Garantia extra: se ainda veio como nullable Float64, converte para numpy.
+    if str(numeric.dtype) not in ("float64", "float32"):
+        try:
+            numeric = numeric.astype("float64")
+        except (TypeError, ValueError):
+            numeric = pd.Series(
+                numeric.to_numpy(dtype="float64", na_value=np.nan),
+                index=series.index,
+            )
+    else:
+        # Já é numpy float64: garante que é um Series numpy-backed (não extension).
+        if not isinstance(numeric.dtype, np.dtype):
+            numeric = pd.Series(
+                numeric.to_numpy(dtype="float64", na_value=np.nan),
+                index=series.index,
+            )
 
     # Detecta inteiros fora da faixa sem separador decimal → provável erro de escala.
     integer_like = numeric.notna() & numeric.mod(1).eq(0)
@@ -627,9 +750,14 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     result = df.copy()
 
+    # >>> CORREÇÃO: aplica aliases locais (ex.: ESTADO_CHAMADA → situacao) ANTES
+    # de qualquer etapa do pipeline. Cobre arquivos XLSX que não passaram pelo
+    # normalize_column_names por já terem colunas canônicas parciais.
+    result = _apply_local_aliases(result)
+
     # -- Etapa 1: data/hora de criação e derivações temporais ----------------
     if "data_hora_criacao" in result.columns:
-        created = parse_datetime_series(result["data_hora_criacao"])
+        created = _safe_datetime(result["data_hora_criacao"])
         result["chamada_data_inclusao"] = created.dt.normalize()
         result["chamada_hora_inclusao"] = pd.to_timedelta(
             created.dt.time.astype(str), errors="coerce"
@@ -662,7 +790,7 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     # -- Etapa 5: data_hora_fim (terminal vs. agora) -------------------------
     end_times = (
-        parse_datetime_series(result["data_hora_situacao_atual"])
+        _safe_datetime(result["data_hora_situacao_atual"])
         if "data_hora_situacao_atual" in result.columns
         else pd.Series(pd.NaT, index=result.index, dtype="datetime64[ns]")
     )

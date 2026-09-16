@@ -62,6 +62,10 @@ COLUMN_MAPPING: dict[str, str] = {
     "Data/hora da situaçăo atual": "data_hora_situacao_atual",
     "Data/hora da situacao atual": "data_hora_situacao_atual",
     "Evento associado": "evento_associado",
+    "ESTADO_CHAMADA": "situacao",
+    "Estado_chamada": "situacao",
+    "Estado Chamada": "situacao",
+    "Estado da Chamada": "situacao",
 }
 
 
@@ -235,13 +239,13 @@ def parse_datetime_series(series: pd.Series) -> pd.Series:
     Returns:
         Série de ``datetime64[ns]`` sem timezone; valores inválidos → ``NaT``.
     """
-    return pd.to_datetime(
-        series,
-        format="mixed",
-        errors="coerce",
-        dayfirst=True,
-        utc=True,
+    parsed = pd.to_datetime(
+        series, format="mixed", errors="coerce", dayfirst=True, utc=True,
     ).dt.tz_localize(None)
+    return pd.Series(
+        parsed.to_numpy(dtype="datetime64[ns]", na_value=np.datetime64("NaT")),
+        index=series.index,
+    )
 
 
 def extract_municipio(local: Any) -> Any:
