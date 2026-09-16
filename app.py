@@ -370,23 +370,67 @@ with tab1:
             fig = plot_bar(fraction_counts, "fracao", "contagem", "Top 15 Frações e Unidades Operacionais", 15)
             fig.update_layout(width=1400, height=700, xaxis={"categoryorder": "total descending"}, margin={"l": 40, "r": 20, "t": 60, "b": 180})
             st.plotly_chart(fig, width="stretch")
+
+    # ---------------------------------------------------------------------
+    # Classificações e Situações em gráficos SEPARADOS
+    # ---------------------------------------------------------------------
     left, right = st.columns(2)
     with left:
         if "Empenhos.recurso_codigo_prefixo" in df_filtered:
             resources = df_filtered["Empenhos.recurso_codigo_prefixo"].fillna("").astype(str).str.replace(" / ", ",", regex=False).str.split(",").explode().str.strip()
             st.plotly_chart(plot_bar(counts(resources.to_frame(name="prefixo"), "prefixo"), "prefixo", "contagem", "Top 15 Viaturas Mais Empenhadas", 15), width="stretch")
     with right:
-        # Ranking combinando classificacao e situacao (fallback quando
-        # classificacao esta vazia — caso tipico das chamadas ativas).
+        # Gráfico exclusivo das CLASSIFICAÇÕES (Tipo de classificação)
         if class_column:
-            ranking_labels = df_filtered[class_column].astype("string").str.strip()
+            class_series = (
+                df_filtered[class_column].astype("string").str.strip()
+            )
+            class_series = class_series[class_series.notna() & class_series.ne("")]
+            class_counts = (
+                class_series.value_counts().rename_axis("classificacao").reset_index(name="contagem")
+            )
+            if not class_counts.empty:
+                st.plotly_chart(
+                    plot_bar(class_counts, "classificacao", "contagem", "Top 10 Classificações de Chamadas", 10),
+                    width="stretch",
+                )
+            else:
+                st.info("Sem classificações preenchidas no recorte atual.")
         else:
-            ranking_labels = pd.Series(pd.NA, index=df_filtered.index, dtype="string")
-        if "situacao" in df_filtered.columns:
-            status_labels = df_filtered["situacao"].astype("string").str.strip()
-            ranking_labels = ranking_labels.mask(ranking_labels.isna() | ranking_labels.eq(""), status_labels)
-        ranking_data = pd.DataFrame({"classificacao_ranking": ranking_labels})
-        st.plotly_chart(plot_bar(counts(ranking_data, "classificacao_ranking", "contagem"), "classificacao_ranking", "contagem", "Top 10 Classificações / Situações", 10), width="stretch")
+            st.info("Coluna de classificação indisponível neste recorte.")
+
+    # Gráfico exclusivo das SITUAÇÕES OPERACIONAIS
+    # Excluímos "Classificada" porque essa é a classificação final (terminal);
+    # aqui queremos mostrar os estados ativos (Terminada, Atribuída ao órgão,
+    # Em controle, No local, À caminho, Despachada, Em retorno, Suspensa, etc.)
+    if "situacao_norm" in df_filtered.columns:
+        sit_series = df_filtered["situacao_norm"].astype("string").str.strip()
+        sit_series = sit_series[
+            sit_series.notna()
+            & sit_series.ne("")
+            & ~sit_series.str.casefold().eq("classificada")
+        ]
+        sit_counts = (
+            sit_series.value_counts().rename_axis("situacao").reset_index(name="contagem")
+        )
+        if not sit_counts.empty:
+            st.plotly_chart(
+                plot_bar(
+                    sit_counts,
+                    "situacao",
+                    "contagem",
+                    "Top 10 Situações Operacionais (Chamadas Ativas)",
+                    10,
+                ),
+                width="stretch",
+            )
+            st.caption(
+                "Estas são as situações operacionais distintas de **Classificada** — "
+                "chamadas ainda ativas no sistema (o tempo é medido em relação a agora)."
+            )
+        else:
+            st.info("Sem situações operacionais distintas de *Classificada* no recorte.")
+
     resource_concentration = plot_resource_concentration(df_filtered)
     if resource_concentration is not None:
         st.plotly_chart(resource_concentration, width="stretch")
@@ -464,37 +508,28 @@ with tab3:
         st.plotly_chart(plot_bar(week, "dia", "chamadas", "Distribuição de Chamadas por Dia da Semana"), width="stretch")
     left, right = st.columns(2)
     with left:
-        # Pie combinando classificacao + situacao (fallback quando classificacao vazia).
+        # Pie exclusivo das CLASSIFICAÇÕES (não mistura com situações).
         if class_column:
             pie_series = df_filtered[class_column].astype("string").str.strip()
-        else:
-            pie_series = pd.Series(pd.NA, index=df_filtered.index, dtype="string")
-        if "situacao" in df_filtered.columns:
-            status_labels = df_filtered["situacao"].astype("string").str.strip()
-            pie_series = pie_series.mask(
-                pie_series.isna() | pie_series.eq(""), status_labels
+            pie_series = pie_series[pie_series.notna() & pie_series.ne("")]
+            pie_data = (
+                pie_series.value_counts()
+                .rename_axis("classificacao").reset_index(name="contagem")
             )
-        pie_data = (
-            pie_series.dropna()
-            .loc[lambda s: s.ne("")]
-            .value_counts()
-            .rename_axis("classificacao_situacao")
-            .reset_index(name="contagem")
-        )
-        if not pie_data.empty:
-            pie_fig = px.pie(
-                pie_data,
-                names="classificacao_situacao",
-                values="contagem",
-                title="Distribuição por Classificação / Situação da Chamada",
-            )
-            pie_fig.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(pie_fig, width="stretch")
-        else:
-            st.info("Sem dados de classificação ou situação para exibir.")
+            if not pie_data.empty:
+                pie_fig = px.pie(
+                    pie_data,
+                    names="classificacao",
+                    values="contagem",
+                    title="Distribuição por Classificação da Chamada",
+                )
+                pie_fig.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(pie_fig, width="stretch")
+            else:
+                st.info("Sem classificações preenchidas no recorte.")
     with right:
         if unit_column in df_filtered:
             bbm_counts = counts(df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)), "bbm", "chamadas")
@@ -668,6 +703,12 @@ with tab5:
 
 # ===========================================================================
 # TAB 6 — Operacional (Ativas)
+# ---------------------------------------------------------------------------
+# Foco desta aba: chamadas AINDA EM ANDAMENTO.
+# Gráficos/tabelas duplicados de outras abas foram removidos:
+#   - Boxplot "Tempo por Situação Operacional" -> já em tab5
+#   - Mapa das chamadas ativas -> já coberto pela tab4 (mesma df_filtered)
+# Permanecem: métricas, distribuição por situação operacional, SLA e tabela.
 # ===========================================================================
 with tab6:
     st.header("🚨 Painel Operacional — Chamadas em Andamento")
@@ -687,17 +728,16 @@ with tab6:
             c4.metric("📍 Municípios ativos", ativas["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in ativas else 0)
 
             st.divider()
-            left, right = st.columns(2)
-            with left:
-                fig = plot_situacao_operacional(ativas)
-                if fig is not None:
-                    st.plotly_chart(fig, width="stretch")
-            with right:
-                fig = plot_tempo_por_situacao(ativas, min_registros=2)
-                if fig is not None:
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.info("Dados insuficientes para o boxplot por situação.")
+            st.subheader("📊 Distribuição por Situação Operacional")
+            fig = plot_situacao_operacional(ativas)
+            if fig is not None:
+                st.plotly_chart(fig, width="stretch")
+                st.caption(
+                    "Cada fatia representa uma situação operacional distinta de **Classificada** — "
+                    "chamadas ainda pendentes na tela do despachante."
+                )
+            else:
+                st.info("Sem situações operacionais para exibir.")
 
             st.subheader("⏱️ SLA de Chamadas em Aberto")
             if "tempo_no_estado_horas" in ativas:
@@ -737,17 +777,6 @@ with tab6:
             if "tempo_no_estado_horas" in tabela.columns:
                 tabela = tabela.sort_values("tempo_no_estado_horas", ascending=False)
             st.dataframe(tabela, width="stretch", hide_index=True)
-
-            st.subheader("🗺️ Distribuição Geográfica das Chamadas Ativas")
-            lat, lon = "Chamada_atendimentos.local_latitude", "Chamada_atendimentos.local_longitude"
-            if lat in ativas.columns and lon in ativas.columns:
-                mapa_df = ativas.dropna(subset=[lat, lon])
-                if not mapa_df.empty:
-                    mapa, mostrados = create_occurrence_map(mapa_df, sample_size=len(mapa_df), mode_or_group="cluster")
-                    st_folium(mapa, width=1200, height=500)
-                    st.caption(f"Mostrando {mostrados:,} chamadas ativas com coordenadas válidas.")
-                else:
-                    st.info("Nenhuma chamada ativa com coordenadas disponíveis.")
 
 # ===========================================================================
 # TAB 7 — Flags, Agências e Natureza
