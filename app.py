@@ -382,13 +382,9 @@ with tab1:
     with right:
         # Gráfico exclusivo das CLASSIFICAÇÕES (Tipo de classificação)
         if class_column:
-            class_series = (
-                df_filtered[class_column].astype("string").str.strip()
-            )
+            class_series = df_filtered[class_column].astype("string").str.strip()
             class_series = class_series[class_series.notna() & class_series.ne("")]
-            class_counts = (
-                class_series.value_counts().rename_axis("classificacao").reset_index(name="contagem")
-            )
+            class_counts = class_series.value_counts().rename_axis("classificacao").reset_index(name="contagem")
             if not class_counts.empty:
                 st.plotly_chart(
                     plot_bar(class_counts, "classificacao", "contagem", "Top 10 Classificações de Chamadas", 10),
@@ -400,9 +396,6 @@ with tab1:
             st.info("Coluna de classificação indisponível neste recorte.")
 
     # Gráfico exclusivo das SITUAÇÕES OPERACIONAIS
-    # Excluímos "Classificada" porque essa é a classificação final (terminal);
-    # aqui queremos mostrar os estados ativos (Terminada, Atribuída ao órgão,
-    # Em controle, No local, À caminho, Despachada, Em retorno, Suspensa, etc.)
     if "situacao_norm" in df_filtered.columns:
         sit_series = df_filtered["situacao_norm"].astype("string").str.strip()
         sit_series = sit_series[
@@ -410,9 +403,7 @@ with tab1:
             & sit_series.ne("")
             & ~sit_series.str.casefold().eq("classificada")
         ]
-        sit_counts = (
-            sit_series.value_counts().rename_axis("situacao").reset_index(name="contagem")
-        )
+        sit_counts = sit_series.value_counts().rename_axis("situacao").reset_index(name="contagem")
         if not sit_counts.empty:
             st.plotly_chart(
                 plot_bar(
@@ -508,14 +499,10 @@ with tab3:
         st.plotly_chart(plot_bar(week, "dia", "chamadas", "Distribuição de Chamadas por Dia da Semana"), width="stretch")
     left, right = st.columns(2)
     with left:
-        # Pie exclusivo das CLASSIFICAÇÕES (não mistura com situações).
         if class_column:
             pie_series = df_filtered[class_column].astype("string").str.strip()
             pie_series = pie_series[pie_series.notna() & pie_series.ne("")]
-            pie_data = (
-                pie_series.value_counts()
-                .rename_axis("classificacao").reset_index(name="contagem")
-            )
+            pie_data = pie_series.value_counts().rename_axis("classificacao").reset_index(name="contagem")
             if not pie_data.empty:
                 pie_fig = px.pie(
                     pie_data,
@@ -622,23 +609,41 @@ with tab5:
         metrics[4].metric("⏰ Duração > 24h", f"{over_day:,} ({over_day / len(time_data) * 100:.1f}%)")
         st.divider()
 
+        # -------------------------------------------------------------
+        # Histograma ÚNICO (sem split por categoria): conceitualmente
+        # correto. A linha vertical em 24h marca o limiar curto/longo
+        # sem quebrar o conceito de histograma em duas distribuições
+        # com bins desalinhados.
+        # -------------------------------------------------------------
         st.subheader("Distribuição do Tempo (em horas)")
-        time_data["categoria"] = np.where(time_data.tempo_horas <= 24, "Até 24h", "Acima de 24h")
         fig = plot_histogram(
-            time_data, "tempo_horas", "Histograma do Tempo",
-            color="categoria", nbins=50,
-            labels={"tempo_horas": "Tempo (horas)", "contagem": "Nº de Chamadas", "categoria": "Faixa"},
-            barmode="stack",
+            time_data,
+            "tempo_horas",
+            "Histograma do Tempo de Atendimento",
+            nbins=60,
+            labels={"tempo_horas": "Tempo de Atendimento (horas)", "count": "Nº de Chamadas"},
         )
-        fig.update_layout(legend_title_text="Faixa de Duração")
+        fig.add_vline(
+            x=24,
+            line_dash="dash",
+            line_color="#d62728",
+            annotation_text="24 h",
+            annotation_position="top right",
+        )
+        fig.update_layout(xaxis_title="Tempo de Atendimento (horas)", yaxis_title="Nº de Chamadas")
         st.plotly_chart(fig, width="stretch")
+        st.caption(
+            "Histograma de **todas** as chamadas do recorte, em horas. "
+            "A linha tracejada em **24 h** sinaliza o limiar entre atendimentos curtos e longos. "
+            "O histograma dedicado às chamadas com duração superior a 24 h vem a seguir, em dias."
+        )
 
         over_data = time_data[time_data.tempo_horas > 24].assign(dias=lambda data: np.ceil(data.tempo_horas / 24).astype(int))
         if not over_data.empty:
             st.plotly_chart(
                 plot_histogram(
                     over_data, "dias", "Distribuição dos Atendimentos com Duração > 24h (em dias)",
-                    nbins=20, labels={"dias": "Duração (dias)", "contagem": "Nº de Chamadas"},
+                    nbins=20, labels={"dias": "Duração (dias)", "count": "Nº de Chamadas"},
                 ),
                 width="stretch",
             )
@@ -703,12 +708,6 @@ with tab5:
 
 # ===========================================================================
 # TAB 6 — Operacional (Ativas)
-# ---------------------------------------------------------------------------
-# Foco desta aba: chamadas AINDA EM ANDAMENTO.
-# Gráficos/tabelas duplicados de outras abas foram removidos:
-#   - Boxplot "Tempo por Situação Operacional" -> já em tab5
-#   - Mapa das chamadas ativas -> já coberto pela tab4 (mesma df_filtered)
-# Permanecem: métricas, distribuição por situação operacional, SLA e tabela.
 # ===========================================================================
 with tab6:
     st.header("🚨 Painel Operacional — Chamadas em Andamento")
