@@ -1,4 +1,20 @@
-"""Funcoes puras para normalizacao e enriquecimento dos dados do COBOM."""
+"""
+Funções puras de normalização, parsing e enriquecimento dos dados do COBOM-BH.
+
+Este módulo NÃO depende de Streamlit, Plotly ou qualquer biblioteca de I/O.
+É importado por `data_loader.py`, `visualizations.py` e `app.py` para garantir
+que a lógica de domínio permaneça testável e reutilizável fora do contexto web.
+
+Responsabilidades:
+    - Mapear cabeçalhos do CAD para nomes canônicos (COLUMN_MAPPING).
+    - Reverter mojibake (encoding CP1252 ↔ UTF-8) em cabeçalhos e valores.
+    - Fazer parsing robusto de datas e coordenadas em formatos brasileiros.
+    - Extrair BBM, fração, recursos empenhados e origem do REDS.
+    - Detectar o tipo de arquivo (classificadas / ativas / genérico).
+    - Fornecer utilitários de segurança para popups de mapa.
+"""
+
+from __future__ import annotations
 
 import re
 from typing import Any
@@ -7,7 +23,17 @@ import numpy as np
 import pandas as pd
 
 
-COLUMN_MAPPING = {
+# ---------------------------------------------------------------------------
+# MAPEAMENTO DE COLUNAS DO CAD
+# ---------------------------------------------------------------------------
+# Rótulos exibidos no export do CAD (alguns com variantes de acentuação e/ou
+# caracteres corrompidos por encoding) → nome canônico usado internamente.
+#
+# Sempre que um novo export introduzir um rótulo diferente, adicione aqui.
+# `normalize_column_names` também tenta a versão corrigida por `fix_mojibake`
+# caso o mapeamento direto falhe.
+# ---------------------------------------------------------------------------
+COLUMN_MAPPING: dict[str, str] = {
     "Nº chamada": "chamada_numero",
     "Nş chamada": "chamada_numero",
     "Nº REDS": "reds",
@@ -38,9 +64,14 @@ COLUMN_MAPPING = {
     "Evento associado": "evento_associado",
 }
 
-# Mapa de mojibake -> caracteres originais.
-# Ocorre quando o export e gerado em CP1252 e lido como UTF-8 (ou vice-versa),
-# transformando 'º'->'ş', 'ã'->'ă', 'Ã'->'Ă', 'Ç'->'Ţ', 'É'->'Ę', etc.
+
+# ---------------------------------------------------------------------------
+# CORREÇÃO DE MOJIBAKE
+# ---------------------------------------------------------------------------
+# O export do CAD pode ser gerado em CP1252 e lido como UTF-8 (ou vice-versa),
+# o que transforma acentos e o símbolo "º" em sequências estranhas.
+# Este mapa reverte os casos conhecidos.
+# ---------------------------------------------------------------------------
 _MOJIBAKE_MAP = str.maketrans({
     "ş": "º",
     "Ş": "º",
@@ -58,13 +89,27 @@ _MOJIBAKE_MAP = str.maketrans({
 
 
 def fix_mojibake(text: Any) -> str:
-    """Reverte caracteres corrompidos por encoding mismatch em exports do CAD."""
+    """Reverte caracteres corrompidos por encoding mismatch em exports do CAD.
+
+    Args:
+        text: Valor de entrada (str, None, NaN, etc.).
+
+    Returns:
+        String com os caracteres corrigidos. Retorna ``""`` para ``None``.
+    """
     if text is None:
         return ""
     return str(text).translate(_MOJIBAKE_MAP)
 
 
-NATUREZA_GRUPOS = {
+# ---------------------------------------------------------------------------
+# GRUPOS TEMÁTICOS DE NATUREZA
+# ---------------------------------------------------------------------------
+# O código da natureza segue o padrão `<LETRA><5 dígitos>` (ex.: V12345).
+# A letra inicial identifica o grupo temático. Prioridade vem anexada à
+# descrição no formato "Prioridade: N".
+# ---------------------------------------------------------------------------
+NATUREZA_GRUPOS: dict[str, str] = {
     "V": "🚑 APH / Vítimas",
     "O": "🔥 Incêndios / Queimadas",
     "S": "🆘 Salvamentos",
@@ -79,33 +124,41 @@ NATUREZA_GRUPOS = {
 }
 
 
-# Situacoes que ENCERRAM o ciclo operacional.
-#
-# IMPORTANTE: no CAD, APENAS "Classificada" retira a chamada da tela do
-# despachante. Todos os demais valores (Terminada, Atribuída ao órgão,
-# Em controle, Em direção, À caminho, No local, Despachada, Em retorno,
+# ---------------------------------------------------------------------------
+# REGRA DE NEGÓCIO: SITUAÇÕES TERMINAIS
+# ---------------------------------------------------------------------------
+# No CAD, APENAS "Classificada" retira a chamada da tela do despachante.
+# Todos os demais estados (Terminada, Em controle, No local, À caminho,
 # Suspensa, Nada constatado, Teste, RAT, Duplicada, Dispensada pelo
-# solicitante, Solicitante não encontrado, Não atendida: falta de viatura/
-# efetivo, Atendida pelo SAMU, Repassada a outros órgãos, Ocorrências
-# típicas de bombeiros atendida por outros órgãos, Orientação, Orientação
-# da regulação médica) mantêm a chamada ATIVA no sistema.
+# solicitante, etc.) mantêm a chamada ATIVA — o tempo decorrido é medido
+# em relação a `now()`.
 #
-# Portanto: chamadas com qualquer situação diferente de "Classificada"
-# recebem now() como data_hora_fim e o tempo decorrido é exibido como
-# tempo de atendimento em andamento.
-SITUACOES_TERMINAIS = {"classificada"}
+# Este conjunto é usado por `data_loader._enrich_situacao` e por toda a
+# lógica de SLA/ativas nas abas 5 e 6 do dashboard.
+# ---------------------------------------------------------------------------
+SITUACOES_TERMINAIS: set[str] = {"classificada"}
 
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Padroniza nomes de colunas; tolerante a cabecalhos com mojibake.
+    """Padroniza os nomes de colunas; tolerante a cabeçalhos com mojibake.
 
-    Estrategia por coluna:
-    1. Tenta mapeamento direto em COLUMN_MAPPING.
-    2. Se nao casar, aplica fix_mojibake e tenta novamente.
-    3. Se ainda nao casar, mantem o nome (apenas com mojibake revertido).
+    Estratégia por coluna:
+        1. Tenta mapeamento direto em ``COLUMN_MAPPING``.
+        2. Se não casar, aplica ``fix_mojibake`` e tenta novamente.
+        3. Se ainda não casar, mantém o nome (apenas com mojibake revertido).
+
+    Colunas duplicadas após o mapeamento são removidas (primeira ocorrência
+    vence), evitando conflito em operações vetoriais posteriores.
+
+    Args:
+        df: DataFrame original.
+
+    Returns:
+        Novo DataFrame com colunas renomeadas.
     """
     result = df.copy()
     original = result.columns.astype(str).str.strip()
+
     mapped: list[str] = []
     for col in original:
         target = COLUMN_MAPPING.get(col)
@@ -113,28 +166,51 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
             fixed = fix_mojibake(col).strip()
             target = COLUMN_MAPPING.get(fixed, fixed)
         mapped.append(target)
+
     result.columns = pd.Index(mapped)
+
+    # Remove duplicatas (mantém a primeira ocorrência).
     if result.columns.duplicated().any():
         result = result.loc[:, ~result.columns.duplicated()]
+
     return result
 
 
 def parse_coordinate(value: Any, max_abs: float) -> float:
-    """Converte coordenadas em formatos decimais brasileiros e exportados."""
+    """Converte coordenadas em formatos decimais brasileiros e exportados.
+
+    Trata:
+        - vírgula como separador decimal ("-19,9167")
+        - múltiplos pontos como separador de milhar ("-19.916.700")
+        - strings vazias, "nan" e valores não numéricos (retorna ``np.nan``)
+        - valores fora da faixa ``[-max_abs, max_abs]`` (retorna ``np.nan``)
+
+    Args:
+        value: Valor bruto da coordenada.
+        max_abs: Limite absoluto (90 para latitude, 180 para longitude).
+
+    Returns:
+        Float dentro da faixa válida, ou ``np.nan``.
+    """
     if pd.isna(value):
         return np.nan
+
     value_str = str(value).strip().replace(" ", "")
     if not value_str or value_str.lower() == "nan":
         return np.nan
+
     try:
+        # Caso 1: múltiplos pontos sem vírgula (ex.: "-19.916.700").
         if value_str.count(".") > 1 and "," not in value_str:
             sign = "-" if value_str.startswith("-") else ""
             unsigned_value = value_str.lstrip("+-")
             groups = unsigned_value.split(".")
+            # Posiciona o decimal após os 2 primeiros dígitos (padrão lat/lon).
             decimal_position = min(len(groups[0]), 2)
             digits = "".join(groups)
             parsed = float(f"{sign}{digits[:decimal_position]}.{digits[decimal_position:]}")
         else:
+            # Caso 2: vírgula como decimal.
             parsed = float(
                 value_str.replace(".", "").replace(",", ".")
                 if "," in value_str
@@ -142,11 +218,23 @@ def parse_coordinate(value: Any, max_abs: float) -> float:
             )
     except (TypeError, ValueError):
         return np.nan
+
     return parsed if abs(parsed) <= max_abs else np.nan
 
 
 def parse_datetime_series(series: pd.Series) -> pd.Series:
-    """Tenta os formatos conhecidos e depois o parser flexivel do pandas."""
+    """Converte uma série textual em ``datetime64``, tolerando formatos mistos.
+
+    Usa ``format="mixed"`` (Pandas ≥ 2.0) e ``dayfirst=True`` para acomodar
+    os formatos brasileiros (DD/MM/YYYY). Timestamps em UTC são convertidos
+    para naive (sem timezone) para consistência interna.
+
+    Args:
+        series: Série de strings/objetos representando datas.
+
+    Returns:
+        Série de ``datetime64[ns]`` sem timezone; valores inválidos → ``NaT``.
+    """
     return pd.to_datetime(
         series,
         format="mixed",
@@ -157,6 +245,17 @@ def parse_datetime_series(series: pd.Series) -> pd.Series:
 
 
 def extract_municipio(local: Any) -> Any:
+    """Extrai o município a partir do campo ``local_do_fato``.
+
+    Assume o formato ``"LOGRADOURO - MUNICÍPIO"``. Retorna ``np.nan`` se o
+    separador não estiver presente.
+
+    Args:
+        local: Valor de ``local_do_fato``.
+
+    Returns:
+        Nome do município ou ``np.nan``.
+    """
     if pd.isna(local):
         return np.nan
     parts = str(local).split(" - ")
@@ -164,6 +263,17 @@ def extract_municipio(local: Any) -> Any:
 
 
 def extrair_bbm(unidade: Any) -> str:
+    """Extrai o Batalhão / Companhia Independente a partir do nome da unidade.
+
+    Formato esperado: ``"1º BBM / 1ª CIA (BAIRRO)"``. Retorna o segmento que
+    contém ``"BBM"`` ou ``"CIA IND"`` sem o sufixo entre parênteses.
+
+    Args:
+        unidade: Nome completo da unidade.
+
+    Returns:
+        Nome do BBM/CIA IND, ou ``"Outros"`` se nada for reconhecido.
+    """
     if pd.isna(unidade):
         return "Outros"
     for part in str(unidade).split("/"):
@@ -174,6 +284,16 @@ def extrair_bbm(unidade: Any) -> str:
 
 
 def extrair_fracao(unidade: Any) -> str:
+    """Remove o bairro entre parênteses e normaliza as partes da unidade.
+
+    Exemplo: ``"1º BBM / 1ª CIA (SAVASSI - BH)"`` → ``"1º BBM / 1ª CIA"``.
+
+    Args:
+        unidade: Nome completo da unidade.
+
+    Returns:
+        Fração/Unidade normalizada, ou ``"Outros"`` se vazio.
+    """
     if pd.isna(unidade):
         return "Outros"
     text = re.sub(r"\s*\([^)]*\)", "", str(unidade).strip())
@@ -182,6 +302,18 @@ def extrair_fracao(unidade: Any) -> str:
 
 
 def extrair_recursos(df: pd.DataFrame) -> list[str]:
+    """Lista os prefixos de viaturas/recursos únicos presentes no DataFrame.
+
+    O campo ``Empenhos.recurso_codigo_prefixo`` pode conter múltiplos recursos
+    separados por ``" / "``. Esta função explodde esses valores e retorna
+    a lista ordenada e sem duplicatas.
+
+    Args:
+        df: DataFrame que pode ou não conter a coluna de recursos.
+
+    Returns:
+        Lista ordenada de prefixos; ``[]`` se a coluna não existir.
+    """
     column = "Empenhos.recurso_codigo_prefixo"
     if column not in df.columns:
         return []
@@ -191,22 +323,52 @@ def extrair_recursos(df: pd.DataFrame) -> list[str]:
 
 
 def coluna_ou_none(df: pd.DataFrame, *names: str) -> str | None:
+    """Retorna o primeiro nome de coluna existente em ``df``; senão ``None``.
+
+    Útil quando o schema varia entre versões do export do CAD e queremos
+    tratar múltiplas variantes sem quebrar.
+
+    Args:
+        df: DataFrame a inspecionar.
+        *names: Nomes candidatos em ordem de preferência.
+
+    Returns:
+        Nome da coluna encontrada, ou ``None``.
+    """
     return next((name for name in names if name in df.columns), None)
 
 
 def safe_map_text(value: Any, default: str = "N/A", max_len: int | None = None) -> str:
+    """Retorna texto seguro para popups de mapa (evita ``None``/``NaN``).
+
+    Args:
+        value: Valor bruto (pode ser ``NaN``, ``None``, número, etc.).
+        default: Texto a usar se o valor for nulo.
+        max_len: Se definido, trunca o texto ao número de caracteres.
+
+    Returns:
+        String segura para exibição em HTML.
+    """
     text = default if pd.isna(value) else str(value)
     return text[:max_len] if max_len is not None else text
 
 
 def detect_file_type(df: pd.DataFrame, filename: str = "") -> str:
-    """Identifica se o DataFrame veio de um export 'classificadas', 'ativas' ou outro.
+    """Classifica o DataFrame em ``"classificadas"``, ``"ativas"`` ou ``"generico"``.
 
-    Prioridade:
-    1) Nome do arquivo (contem 'ativ' ou 'classific').
-    2) Conteudo da coluna `situacao`: um unico valor == 'classificada' ->
-       'classificadas'; multiplos valores -> 'ativas'.
-    3) Fallback: 'generico'.
+    Ordem de prioridade:
+        1. Nome do arquivo contém ``"ativ"`` → ``"ativas"``.
+        2. Nome do arquivo contém ``"classific"`` → ``"classificadas"``.
+        3. Conteúdo de ``situacao``: valor único ``"classificada"`` →
+           ``"classificadas"``; múltiplos valores → ``"ativas"``.
+        4. Fallback → ``"generico"``.
+
+    Args:
+        df: DataFrame já normalizado.
+        filename: Nome original do arquivo (usado como dica).
+
+    Returns:
+        Um dos três rótulos canônicos.
     """
     name = (filename or "").lower()
     if "ativ" in name:
@@ -214,6 +376,7 @@ def detect_file_type(df: pd.DataFrame, filename: str = "") -> str:
     if "classific" in name:
         return "classificadas"
 
+    # Inspeciona variantes do nome da coluna de situação.
     for col in ("situacao", "Situaçăo", "Situação", "Situacao", "situaçăo"):
         if col in df.columns:
             valores = (

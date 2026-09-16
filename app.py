@@ -1,3 +1,29 @@
+"""
+Aplicação principal do Dashboard COBOM-BH (Streamlit).
+
+Este módulo é o entrypoint da aplicação. Responsabilidades:
+    - Configurar layout e estilo global do Streamlit.
+    - Gerenciar a barra lateral: upload de arquivos, botão de dados de
+      demonstração, filtros em cascata e passo a passo do CAD.
+    - Manter caches em duas camadas:
+        * ``st.session_state["cached_dataframes"]`` e
+          ``st.session_state["cached_file_signatures"]`` (hash SHA-256) —
+          evita reprocessar uploads inalterados.
+        * ``@st.cache_data`` interno em ``data_loader`` (chave de filtros
+          hashable).
+    - Consolidar múltiplos arquivos em um único DataFrame com colunas
+      ``arquivo`` e ``tipo_arquivo``.
+    - Renderizar cards de métricas e as sete abas analíticas.
+
+Dependências internas:
+    - ``data_loader``: leitura, processamento e filtros.
+    - ``visualizations``: gráficos Plotly e mapas Folium.
+    - ``utils.demo_data``: gerador de dados sintéticos.
+    - ``utils.helpers``: extração de BBM, fração, recursos, tipo de arquivo.
+"""
+
+from __future__ import annotations
+
 import hashlib
 
 import numpy as np
@@ -33,7 +59,14 @@ from visualizations import (
     plot_tempo_por_situacao,
 )
 
+
+# ===========================================================================
+# CONFIGURAÇÃO GLOBAL E ESTILO
+# ===========================================================================
 st.set_page_config(page_title="Dashboard COBOM-BH", layout="wide", page_icon="🚒")
+
+# Ajustes finos de tipografia para métricas e abas — melhoram legibilidade
+# sem alterar o tema nativo do Streamlit.
 st.markdown("""
 <style>
     .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p { font-size: 1.1rem !important; font-weight: 600 !important; }
@@ -44,15 +77,38 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🚒 Dashboard Interativo - COBOM-BH")
-st.markdown("Análise operacional de chamadas do Corpo de Bombeiros Militar de Minas Gerais recebidas no COBOM-BH")
+st.markdown(
+    "Análise operacional de chamadas do Corpo de Bombeiros Militar de Minas Gerais "
+    "recebidas no COBOM-BH"
+)
 
 
-def counts(dataframe, column, name="contagem"):
+# ===========================================================================
+# HELPERS LOCAIS
+# ===========================================================================
+def counts(dataframe: pd.DataFrame, column: str, name: str = "contagem") -> pd.DataFrame:
+    """Retorna ``value_counts`` de uma coluna como DataFrame de duas colunas.
+
+    Args:
+        dataframe: DataFrame de origem.
+        column: Nome da coluna a contar.
+        name: Nome da coluna de contagem no resultado.
+
+    Returns:
+        DataFrame com ``[column, name]``; vazio se a coluna não existir.
+    """
     if column not in dataframe.columns:
         return pd.DataFrame(columns=[column, name])
     return dataframe[column].dropna().value_counts().rename_axis(column).reset_index(name=name)
 
 
+# ===========================================================================
+# ESTADO DA SESSÃO
+# ===========================================================================
+# ``use_demo_data``: ativa o modo de demonstração (dados sintéticos).
+# ``cached_dataframes``: {nome_arquivo: DataFrame_processado}.
+# ``cached_file_signatures``: {nome_arquivo: sha256(bytes)} — detecta mudanças.
+# ===========================================================================
 if "use_demo_data" not in st.session_state:
     st.session_state["use_demo_data"] = False
 if "cached_dataframes" not in st.session_state:
@@ -60,6 +116,10 @@ if "cached_dataframes" not in st.session_state:
 if "cached_file_signatures" not in st.session_state:
     st.session_state["cached_file_signatures"] = {}
 
+
+# ===========================================================================
+# SIDEBAR — Upload, botões de demo e passo a passo do CAD
+# ===========================================================================
 with st.sidebar:
     st.header("📂 Carregar Dados")
     uploaded_files = st.file_uploader(
@@ -68,12 +128,16 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
+    # Regras de transição de modo (upload vs. demo):
+    #   - Se há uploads, sai do modo demo.
+    #   - Se não há uploads e nem demo ativo, limpa caches.
     if uploaded_files:
         st.session_state["use_demo_data"] = False
     elif not st.session_state["use_demo_data"]:
         st.session_state["cached_dataframes"] = {}
         st.session_state["cached_file_signatures"] = {}
 
+    # Sem uploads → oferece botão de demo (entrar ou sair).
     if not uploaded_files:
         if st.session_state["use_demo_data"]:
             if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
@@ -92,12 +156,23 @@ with st.sidebar:
                 st.rerun()
             st.info("👈 Faça upload de um ou mais arquivos ou utilize os dados de demonstração.")
 
+
+# ===========================================================================
+# TELA INICIAL (sem dados) — botão de demo + passo a passo do CAD
+# ===========================================================================
 if not uploaded_files and not st.session_state["use_demo_data"]:
-    st.info("👈 **Para iniciar a análise, faça o upload do arquivo CSV/XLSX na barra lateral ou clique no botão de demonstração.**")
+    st.info(
+        "👈 **Para iniciar a análise, faça o upload do arquivo CSV/XLSX na barra "
+        "lateral ou clique no botão de demonstração.**"
+    )
 
     c_demo, _ = st.columns([1, 2])
     with c_demo:
-        if st.button("🚀 Explorar com Dados de Demonstração do COBOM", key="main_demo_btn", use_container_width=True):
+        if st.button(
+            "🚀 Explorar com Dados de Demonstração do COBOM",
+            key="main_demo_btn",
+            use_container_width=True,
+        ):
             st.session_state["use_demo_data"] = True
             with st.spinner("Gerando dados sintéticos realistas do COBOM..."):
                 demo_df = generate_demo_cobom_data(1800)
@@ -107,6 +182,7 @@ if not uploaded_files and not st.session_state["use_demo_data"]:
 
     st.subheader("📋 Passo a Passo para Obter os Dados no Sistema CAD")
 
+    # Blocos HTML estilizados com numeração do passo a passo.
     steps_html = """
     <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 10px; margin-bottom: 25px;">
         <div style="display: flex; align-items: flex-start; background: var(--secondary-background-color); border: 1px solid rgba(128, 128, 128, 0.2); border-left: 5px solid #d62728; border-radius: 8px; padding: 14px 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
@@ -157,22 +233,33 @@ if not uploaded_files and not st.session_state["use_demo_data"]:
         """)
     st.stop()
 
+
+# ===========================================================================
+# SIDEBAR — Carga de arquivos com cache por hash SHA-256
+# ===========================================================================
 with st.sidebar:
     if uploaded_files:
+        # Mapa nome → objeto UploadedFile da execução atual.
         current_files_map = {f.name: f for f in uploaded_files}
+
+        # Assinatura SHA-256 de cada arquivo (detecta mudanças de conteúdo).
         current_file_signatures = {
             name: hashlib.sha256(uploaded_file.getvalue()).hexdigest()
             for name, uploaded_file in current_files_map.items()
         }
+
+        # Remove do cache arquivos que saíram do uploader.
         removed_keys = [k for k in st.session_state["cached_dataframes"] if k not in current_files_map]
         for k in removed_keys:
             del st.session_state["cached_dataframes"][k]
             st.session_state["cached_file_signatures"].pop(k, None)
 
+        # Arquivos novos ou com hash diferente precisam ser processados.
         new_files = [
             f for f in uploaded_files
             if st.session_state["cached_file_signatures"].get(f.name) != current_file_signatures[f.name]
         ]
+
         if new_files:
             with st.spinner(f"Carregando e processando {len(new_files)} arquivo(s)..."):
                 for uploaded_file in new_files:
@@ -186,6 +273,7 @@ with st.sidebar:
                     except Exception as error:
                         st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
 
+    # Concatena todos os DataFrames carregados (arquivo + tipo_arquivo).
     dataframes = st.session_state.get("cached_dataframes", {})
     if not dataframes:
         st.error("Nenhum arquivo pôde ser carregado.")
@@ -208,8 +296,12 @@ with st.sidebar:
     if combined.empty:
         st.stop()
 
+    # -----------------------------------------------------------------------
+    # FILTROS
+    # -----------------------------------------------------------------------
     st.header("🔍 Filtros")
 
+    # Tipo de arquivo (Classificadas / Ativas / Genérico).
     tipos_disponiveis = sorted(combined["tipo_arquivo"].dropna().unique().tolist())
     rotulos_tipo = {
         "classificadas": "✅ Classificadas",
@@ -226,15 +318,30 @@ with st.sidebar:
     if not tipos_selecionados:
         tipos_selecionados = tipos_disponiveis
 
+    # Período.
     st.subheader("📅 Período")
     available_dates = sorted(combined["chamada_data_inclusao"].dt.date.unique())
-    data_inicio = st.date_input("Data inicial", value=min(available_dates), min_value=min(available_dates), max_value=max(available_dates))
-    data_fim = st.date_input("Data final", value=max(available_dates), min_value=min(available_dates), max_value=max(available_dates))
+    data_inicio = st.date_input(
+        "Data inicial",
+        value=min(available_dates),
+        min_value=min(available_dates),
+        max_value=max(available_dates),
+    )
+    data_fim = st.date_input(
+        "Data final",
+        value=max(available_dates),
+        min_value=min(available_dates),
+        max_value=max(available_dates),
+    )
     if data_inicio > data_fim:
         st.warning("⚠️ Data inicial não pode ser maior que a data final.")
         data_inicio, data_fim = data_fim, data_inicio
 
-    selected_file = st.selectbox("Selecione um arquivo para análise detalhada (ou 'Todos')", ["Todos", *dataframes])
+    # Seleção de arquivo individual (ou "Todos").
+    selected_file = st.selectbox(
+        "Selecione um arquivo para análise detalhada (ou 'Todos')",
+        ["Todos", *dataframes],
+    )
 
     if selected_file == "Todos":
         source = combined.copy()
@@ -243,6 +350,7 @@ with st.sidebar:
         if "tipo_arquivo" not in source.columns:
             source["tipo_arquivo"] = detect_file_type(source, selected_file)
 
+    # Aplica tipo de arquivo e intervalo de datas.
     if tipos_selecionados and "tipo_arquivo" in source.columns:
         source = source[source["tipo_arquivo"].isin(tipos_selecionados)]
         if source.empty:
@@ -251,6 +359,7 @@ with st.sidebar:
 
     source = source[source["chamada_data_inclusao"].dt.date.between(data_inicio, data_fim)]
 
+    # Nomes canônicos das colunas usadas nos filtros.
     municipality_column = "Chamada_atendimentos.local_municipio_nome"
     nature_column = "Chamada_atendimentos.natureza_descricao"
     unit_column = "Chamada_atendimentos.unidade_servico_nome"
@@ -262,6 +371,7 @@ with st.sidebar:
         "classificacao",
     )
 
+    # Filtros em cascata: cada seleção restringe as opções do próximo.
     with st.expander("Filtros adicionais (em cascata)", expanded=True):
         all_municipalities = sorted(source[municipality_column].dropna().unique()) if municipality_column in source else []
         municipality_filter = st.multiselect("Município", all_municipalities)
@@ -282,6 +392,7 @@ with st.sidebar:
         available_resources = extrair_recursos(cascade_scope)
         resource_filter = st.multiselect("Recursos Empenhados", available_resources)
 
+    # Monta o dicionário de filtros e aplica (com cache).
     filter_dict = {
         municipality_column: municipality_filter,
         nature_column: nature_filter,
@@ -299,40 +410,80 @@ with st.sidebar:
         mime="text/csv",
     )
 
+
+# ===========================================================================
+# PÓS-FILTRO: cálculo de tempo de atendimento (usado nas abas 5 e 6)
+# ===========================================================================
 df_filtered = df_filtered.copy()
 
-# Campos de tempo (tab5 e tab6)
+# Garante a existência de ``data_hora_fim`` mesmo em recortes antigos.
 if "data_hora_fim" not in df_filtered:
     df_filtered["data_hora_fim"] = pd.NaT
-df_filtered["tempo_minutos"] = (df_filtered["data_hora_fim"] - df_filtered["data_hora"]).dt.total_seconds() / 60
+
+# Duração em minutos/horas. Durações negativas são removidas como proteção.
+df_filtered["tempo_minutos"] = (
+    df_filtered["data_hora_fim"] - df_filtered["data_hora"]
+).dt.total_seconds() / 60
 df_filtered = df_filtered[
     df_filtered["tempo_minutos"].isna() | df_filtered["tempo_minutos"].ge(0)
 ].copy()
 df_filtered["tempo_horas"] = df_filtered["tempo_minutos"] / 60
 
+# Fallback de compatibilidade: se não houver coluna de terminalidade,
+# assume tudo terminal (não distorce as métricas principais).
 if "situacao_terminal" not in df_filtered.columns:
     df_filtered["situacao_terminal"] = True
 
-# Cards de métricas gerais
-number_calls = len(df_filtered)
-mean_daily = number_calls / max(1, df_filtered["chamada_data_inclusao"].dt.date.nunique()) if not df_filtered.empty else 0
-number_municipalities = df_filtered["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in df_filtered else 0
-bbm_series = df_filtered["Chamada_atendimentos.unidade_servico_nome"].map(extrair_bbm) if "Chamada_atendimentos.unidade_servico_nome" in df_filtered else pd.Series(dtype=str)
-unit_top = bbm_series.mode().iloc[0] if not bbm_series.mode().empty else "N/D"
-nature_top = df_filtered["Chamada_atendimentos.natureza_descricao"].mode().iloc[0] if "Chamada_atendimentos.natureza_descricao" in df_filtered and not df_filtered["Chamada_atendimentos.natureza_descricao"].mode().empty else "N/D"
-class_top = df_filtered[class_column].mode().iloc[0] if class_column and not df_filtered[class_column].mode().empty else "N/D"
 
+# ===========================================================================
+# CARDS DE MÉTRICAS GERAIS (topo do dashboard)
+# ===========================================================================
+number_calls = len(df_filtered)
+mean_daily = (
+    number_calls / max(1, df_filtered["chamada_data_inclusao"].dt.date.nunique())
+    if not df_filtered.empty
+    else 0
+)
+number_municipalities = (
+    df_filtered["Chamada_atendimentos.local_municipio_nome"].nunique()
+    if "Chamada_atendimentos.local_municipio_nome" in df_filtered
+    else 0
+)
+bbm_series = (
+    df_filtered["Chamada_atendimentos.unidade_servico_nome"].map(extrair_bbm)
+    if "Chamada_atendimentos.unidade_servico_nome" in df_filtered
+    else pd.Series(dtype=str)
+)
+unit_top = bbm_series.mode().iloc[0] if not bbm_series.mode().empty else "N/D"
+nature_top = (
+    df_filtered["Chamada_atendimentos.natureza_descricao"].mode().iloc[0]
+    if "Chamada_atendimentos.natureza_descricao" in df_filtered
+    and not df_filtered["Chamada_atendimentos.natureza_descricao"].mode().empty
+    else "N/D"
+)
+class_top = (
+    df_filtered[class_column].mode().iloc[0]
+    if class_column and not df_filtered[class_column].mode().empty
+    else "N/D"
+)
+
+# Linha 1 de métricas.
 metric_row = st.columns(3)
 metric_row[0].metric("📞 Total de Chamadas", f"{number_calls:,}")
 metric_row[1].metric("📊 Média Diária", f"{mean_daily:.1f}")
 metric_row[2].metric("📍 Municípios Atendidos", number_municipalities)
 
+# Linha 2 de métricas.
 metric_row = st.columns(3)
 metric_row[0].metric("🚒 Unidade Mais Acionada", unit_top)
 metric_row[1].metric("🔥 Natureza Mais Comum", nature_top)
 metric_row[2].metric("📋 Classificação Mais Frequente", class_top)
 st.divider()
 
+
+# ===========================================================================
+# ABAS PRINCIPAIS
+# ===========================================================================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Rankings de Dados",
     "📈 Evolução e Projeção Temporal",
@@ -343,55 +494,130 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🏷️ Flags, Agências e Natureza",
 ])
 
+
 # ===========================================================================
 # TAB 1 — Rankings de Dados
+# ---------------------------------------------------------------------------
+# Objetivo: mostrar o Top-N por diferentes dimensões (natureza, município,
+# unidade, viatura, classificação, situação operacional) e a concentração
+# de recursos entre chamadas.
 # ===========================================================================
 with tab1:
     st.header("📊 Rankings de Dados")
+
+    # -- Coluna esquerda: naturezas + logradouros ---------------------------
     left, right = st.columns(2)
     with left:
-        st.plotly_chart(plot_bar(counts(df_filtered, nature_column), nature_column, "contagem", "Top 15 Naturezas de Ocorrência", 15), width="stretch")
+        st.plotly_chart(
+            plot_bar(
+                counts(df_filtered, nature_column),
+                nature_column,
+                "contagem",
+                "Top 15 Naturezas de Ocorrência",
+                15,
+            ),
+            width="stretch",
+        )
         if "Chamada_atendimentos.local_do_fato" in df_filtered:
+            # Remove rótulos vazios / N/A / N/D antes de contar.
             locations = df_filtered["Chamada_atendimentos.local_do_fato"].dropna()
             locations = locations[
                 locations.str.strip().ne("")
                 & locations.str.strip().str.upper().ne("N/A")
                 & locations.str.strip().str.upper().ne("N/D")
             ]
-            st.plotly_chart(plot_bar(counts(locations.to_frame(), "Chamada_atendimentos.local_do_fato"), "Chamada_atendimentos.local_do_fato", "contagem", "Top 15 Logradouros / Vias", 15), width="stretch")
+            st.plotly_chart(
+                plot_bar(
+                    counts(locations.to_frame(), "Chamada_atendimentos.local_do_fato"),
+                    "Chamada_atendimentos.local_do_fato",
+                    "contagem",
+                    "Top 15 Logradouros / Vias",
+                    15,
+                ),
+                width="stretch",
+            )
+
+    # -- Coluna direita: municípios + BBM + frações -------------------------
     with right:
-        st.plotly_chart(plot_bar(counts(df_filtered, municipality_column), municipality_column, "contagem", "Top 15 Municípios", 15), width="stretch")
+        st.plotly_chart(
+            plot_bar(
+                counts(df_filtered, municipality_column),
+                municipality_column,
+                "contagem",
+                "Top 15 Municípios",
+                15,
+            ),
+            width="stretch",
+        )
         if unit_column in df_filtered:
-            unit_counts = counts(df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)), "bbm")
+            # Agrega por BBM/CIA IND (exclui "Outros").
+            unit_counts = counts(
+                df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)), "bbm"
+            )
             unit_counts = unit_counts[unit_counts.bbm.ne("Outros")]
-            st.plotly_chart(plot_bar(unit_counts, "bbm", "contagem", "Top 15 Batalhões / Companhias Independentes", 15), width="stretch")
-            fraction_counts = counts(df_filtered.assign(fracao=df_filtered[unit_column].map(extrair_fracao)), "fracao")
+            st.plotly_chart(
+                plot_bar(
+                    unit_counts,
+                    "bbm",
+                    "contagem",
+                    "Top 15 Batalhões / Companhias Independentes",
+                    15,
+                ),
+                width="stretch",
+            )
+
+            # Frações/unidades operacionais em gráfico horizontal mais largo.
+            fraction_counts = counts(
+                df_filtered.assign(fracao=df_filtered[unit_column].map(extrair_fracao)),
+                "fracao",
+            )
             fraction_counts = fraction_counts[fraction_counts.fracao.ne("Outros")]
-            fig = plot_bar(fraction_counts, "fracao", "contagem", "Top 15 Frações e Unidades Operacionais", 15)
-            fig.update_layout(width=1400, height=700, xaxis={"categoryorder": "total descending"}, margin={"l": 40, "r": 20, "t": 60, "b": 180})
+            fig = plot_bar(
+                fraction_counts, "fracao", "contagem",
+                "Top 15 Frações e Unidades Operacionais", 15,
+            )
+            fig.update_layout(
+                width=1400, height=700,
+                xaxis={"categoryorder": "total descending"},
+                margin={"l": 40, "r": 20, "t": 60, "b": 180},
+            )
             st.plotly_chart(fig, width="stretch")
 
-    # ---------------------------------------------------------------------
-    # Classificações e Situações em gráficos SEPARADOS
-    # ---------------------------------------------------------------------
+    # -- Viaturas mais empenhadas + Classificações --------------------------
     left, right = st.columns(2)
     with left:
         if "Empenhos.recurso_codigo_prefixo" in df_filtered:
-            resources = df_filtered["Empenhos.recurso_codigo_prefixo"].fillna("").astype(str).str.replace(" / ", ",", regex=False).str.split(",").explode().str.strip()
-            st.plotly_chart(plot_bar(counts(resources.to_frame(name="prefixo"), "prefixo"), "prefixo", "contagem", "Top 15 Viaturas Mais Empenhadas", 15), width="stretch")
-    with right:
-        # Gráfico exclusivo das CLASSIFICAÇÕES (Tipo de classificação)
-        if class_column:
-            class_series = (
-                df_filtered[class_column].astype("string").str.strip()
+            # Explode recursos multi-valor em linhas individuais.
+            resources = (
+                df_filtered["Empenhos.recurso_codigo_prefixo"].fillna("").astype(str)
+                .str.replace(" / ", ",", regex=False).str.split(",").explode().str.strip()
             )
+            st.plotly_chart(
+                plot_bar(
+                    counts(resources.to_frame(name="prefixo"), "prefixo"),
+                    "prefixo",
+                    "contagem",
+                    "Top 15 Viaturas Mais Empenhadas",
+                    15,
+                ),
+                width="stretch",
+            )
+
+    with right:
+        # Gráfico exclusivo das CLASSIFICAÇÕES (não mistura com situações).
+        if class_column:
+            class_series = df_filtered[class_column].astype("string").str.strip()
             class_series = class_series[class_series.notna() & class_series.ne("")]
             class_counts = (
-                class_series.value_counts().rename_axis("classificacao").reset_index(name="contagem")
+                class_series.value_counts()
+                .rename_axis("classificacao").reset_index(name="contagem")
             )
             if not class_counts.empty:
                 st.plotly_chart(
-                    plot_bar(class_counts, "classificacao", "contagem", "Top 10 Classificações de Chamadas", 10),
+                    plot_bar(
+                        class_counts, "classificacao", "contagem",
+                        "Top 10 Classificações de Chamadas", 10,
+                    ),
                     width="stretch",
                 )
             else:
@@ -399,10 +625,7 @@ with tab1:
         else:
             st.info("Coluna de classificação indisponível neste recorte.")
 
-    # Gráfico exclusivo das SITUAÇÕES OPERACIONAIS
-    # Excluímos "Classificada" porque essa é a classificação final (terminal);
-    # aqui queremos mostrar os estados ativos (Terminada, Atribuída ao órgão,
-    # Em controle, No local, À caminho, Despachada, Em retorno, Suspensa, etc.)
+    # -- Situações operacionais (exclui a terminal "Classificada") ----------
     if "situacao_norm" in df_filtered.columns:
         sit_series = df_filtered["situacao_norm"].astype("string").str.strip()
         sit_series = sit_series[
@@ -416,11 +639,8 @@ with tab1:
         if not sit_counts.empty:
             st.plotly_chart(
                 plot_bar(
-                    sit_counts,
-                    "situacao",
-                    "contagem",
-                    "Top 10 Situações Operacionais (Chamadas Ativas)",
-                    10,
+                    sit_counts, "situacao", "contagem",
+                    "Top 10 Situações Operacionais (Chamadas Ativas)", 10,
                 ),
                 width="stretch",
             )
@@ -431,32 +651,69 @@ with tab1:
         else:
             st.info("Sem situações operacionais distintas de *Classificada* no recorte.")
 
+    # -- Concentração de recursos (Pareto) ----------------------------------
     resource_concentration = plot_resource_concentration(df_filtered)
     if resource_concentration is not None:
         st.plotly_chart(resource_concentration, width="stretch")
-        st.caption("As barras mostram a quantidade de viaturas em cada chamada ordenada. A linha indica quanto do total de viaturas está concentrado nas chamadas do ranking.")
+        st.caption(
+            "As barras mostram a quantidade de viaturas em cada chamada ordenada. "
+            "A linha indica quanto do total de viaturas está concentrado nas "
+            "chamadas do ranking."
+        )
+
 
 # ===========================================================================
 # TAB 2 — Evolução e Projeção Temporal
+# ---------------------------------------------------------------------------
+# Objetivo: comparar meses entre anos, projetar sazonalmente os próximos
+# meses e mostrar o volume diário.
 # ===========================================================================
 with tab2:
     st.header("📈 Evolução e Projeção Temporal")
+
     monthly = df_filtered.groupby(["ano", "mes"]).size().reset_index(name="chamadas")
+
+    # Comparação mensal multi-ano (só faz sentido com ≥ 2 anos distintos).
     if len(monthly.ano.unique()) >= 2:
-        st.plotly_chart(plot_line(monthly, "mes", "chamadas", "ano", "Comparação Mensal de Chamadas por Ano"), width="stretch")
+        st.plotly_chart(
+            plot_line(
+                monthly, "mes", "chamadas", "ano",
+                "Comparação Mensal de Chamadas por Ano",
+            ),
+            width="stretch",
+        )
     else:
-        st.info("ℹ️ Selecione um período que contenha pelo menos dois anos distintos para a comparação mensal.")
+        st.info(
+            "ℹ️ Selecione um período que contenha pelo menos dois anos distintos "
+            "para a comparação mensal."
+        )
+
+    # Projeção sazonal — requer ≥ 2 meses de histórico.
     if len(monthly) >= 2:
-        all_months = pd.date_range(df_filtered["chamada_data_inclusao"].min(), df_filtered["chamada_data_inclusao"].max(), freq="MS").to_period("M")
-        full = pd.DataFrame({"ano": all_months.year, "mes": all_months.month}).merge(monthly, how="left").fillna(0)
-        full["periodo"] = pd.to_datetime(full.ano.astype(int).astype(str) + "-" + full.mes.astype(int).astype(str).str.zfill(2))
+        # Grade mensal contínua (preenche meses sem ocorrência com 0).
+        all_months = pd.date_range(
+            df_filtered["chamada_data_inclusao"].min(),
+            df_filtered["chamada_data_inclusao"].max(),
+            freq="MS",
+        ).to_period("M")
+        full = pd.DataFrame({"ano": all_months.year, "mes": all_months.month}).merge(
+            monthly, how="left"
+        ).fillna(0)
+        full["periodo"] = pd.to_datetime(
+            full.ano.astype(int).astype(str) + "-"
+            + full.mes.astype(int).astype(str).str.zfill(2)
+        )
         full = full.sort_values("periodo").reset_index(drop=True)
         full["indice"] = np.arange(len(full))
 
+        # Tendência linear simples.
         model = LinearRegression().fit(full[["indice"]], full["chamadas"])
-        future_indices = pd.DataFrame({"indice": np.arange(full.indice.max() + 1, full.indice.max() + 7)})
+        future_indices = pd.DataFrame({
+            "indice": np.arange(full.indice.max() + 1, full.indice.max() + 7)
+        })
         base_predictions = model.predict(future_indices)
 
+        # Sazonalidade: razão entre valor real e tendência, média por mês.
         if len(full) >= 6:
             full["tendencia"] = model.predict(full[["indice"]]).clip(min=1)
             full["fator_sazonal"] = full["chamadas"] / full["tendencia"]
@@ -464,6 +721,7 @@ with tab2:
         else:
             seasonal_map = {}
 
+        # Projeta os 6 meses seguintes aplicando o fator sazonal.
         future_dates = pd.date_range(start=full.periodo.iloc[-1], periods=7, freq="ME")[1:]
         seasonal_preds = []
         for i, dt in enumerate(future_dates):
@@ -472,40 +730,102 @@ with tab2:
                 pred = pred * seasonal_map[dt.month]
             seasonal_preds.append(max(0, float(pred)))
 
+        # Banda de desvio-padrão histórico como intervalo de confiança simples.
         deviation = float(np.std(full["chamadas"] - model.predict(full[["indice"]])))
-        history = pd.DataFrame({"periodo_str": full.periodo.dt.strftime("%Y-%m"), "chamadas": full.chamadas, "tipo": "Histórico"})
-        future = pd.DataFrame({"periodo_str": future_dates.strftime("%Y-%m"), "chamadas": seasonal_preds, "tipo": "Projeção Sazonal"})
+
+        history = pd.DataFrame({
+            "periodo_str": full.periodo.dt.strftime("%Y-%m"),
+            "chamadas": full.chamadas,
+            "tipo": "Histórico",
+        })
+        future = pd.DataFrame({
+            "periodo_str": future_dates.strftime("%Y-%m"),
+            "chamadas": seasonal_preds,
+            "tipo": "Projeção Sazonal",
+        })
         upper = future.assign(chamadas=future.chamadas + deviation, tipo="Limite Superior")
-        lower = future.assign(chamadas=(future.chamadas - deviation).clip(lower=0), tipo="Limite Inferior")
+        lower = future.assign(
+            chamadas=(future.chamadas - deviation).clip(lower=0), tipo="Limite Inferior"
+        )
+
         projection = pd.concat([history, future, upper, lower], ignore_index=True)
-        fig = plot_line(projection, "periodo_str", "chamadas", "tipo", "Projeção Operacional de Chamadas com Sazonalidade e Margem de Desvio")
+        fig = plot_line(
+            projection, "periodo_str", "chamadas", "tipo",
+            "Projeção Operacional de Chamadas com Sazonalidade e Margem de Desvio",
+        )
         st.plotly_chart(fig, width="stretch")
-        st.caption("A projeção combina a tendência linear histórica com fatores multiplicativos de sazonalidade mensal.")
+        st.caption(
+            "A projeção combina a tendência linear histórica com fatores "
+            "multiplicativos de sazonalidade mensal."
+        )
     else:
-        st.info("ℹ️ Dados insuficientes para realizar a projeção (mínimo 2 meses com ocorrências).")
-    daily = df_filtered.groupby(df_filtered.chamada_data_inclusao.dt.date).size().rename("chamadas").reset_index(name="chamadas").rename(columns={"chamada_data_inclusao": "data"})
-    st.plotly_chart(plot_line(daily, "data", "chamadas", None, "Volume Diário de Chamadas"), width="stretch")
+        st.info(
+            "ℹ️ Dados insuficientes para realizar a projeção (mínimo 2 meses "
+            "com ocorrências)."
+        )
+
+    # Volume diário — sempre disponível.
+    daily = (
+        df_filtered.groupby(df_filtered.chamada_data_inclusao.dt.date)
+        .size()
+        .rename("chamadas").reset_index(name="chamadas")
+        .rename(columns={"chamada_data_inclusao": "data"})
+    )
+    st.plotly_chart(
+        plot_line(daily, "data", "chamadas", None, "Volume Diário de Chamadas"),
+        width="stretch",
+    )
+
 
 # ===========================================================================
 # TAB 3 — Distribuição e Comparação
+# ---------------------------------------------------------------------------
+# Objetivo: padrões horários, dias da semana, classificação e distribuição
+# por unidade operacional.
 # ===========================================================================
 with tab3:
     st.header("📊 Distribuição e Comparação de Dados")
 
+    # -- Matriz de calor Hora × Dia -----------------------------------------
     st.subheader("🔥 Matriz de Calor de Plantão Operacional")
     heatmap_matrix = plot_hourly_weekday_heatmap(df_filtered)
     if heatmap_matrix is not None:
         st.plotly_chart(heatmap_matrix, width="stretch")
-        st.caption("A matriz cruza os 7 dias da semana com as 24 horas do dia para identificar horários de pico.")
+        st.caption(
+            "A matriz cruza os 7 dias da semana com as 24 horas do dia para "
+            "identificar horários de pico."
+        )
 
     st.divider()
+
+    # -- Histogramas por hora e por dia da semana ---------------------------
     left, right = st.columns(2)
     with left:
-        st.plotly_chart(plot_bar(df_filtered["hora"].value_counts().sort_index().rename_axis("hora").reset_index(name="chamadas"), "hora", "chamadas", "Distribuição de Chamadas por Hora do Dia"), width="stretch")
+        st.plotly_chart(
+            plot_bar(
+                df_filtered["hora"].value_counts().sort_index()
+                .rename_axis("hora").reset_index(name="chamadas"),
+                "hora", "chamadas",
+                "Distribuição de Chamadas por Hora do Dia",
+            ),
+            width="stretch",
+        )
     with right:
-        days = {0: "Segunda-feira", 1: "Terça-feira", 2: "Quarta-feira", 3: "Quinta-feira", 4: "Sexta-feira", 5: "Sábado", 6: "Domingo"}
-        week = df_filtered.dia_semana.map(days).value_counts().reindex(list(days.values())).rename_axis("dia").reset_index(name="chamadas")
-        st.plotly_chart(plot_bar(week, "dia", "chamadas", "Distribuição de Chamadas por Dia da Semana"), width="stretch")
+        days = {
+            0: "Segunda-feira", 1: "Terça-feira", 2: "Quarta-feira",
+            3: "Quinta-feira", 4: "Sexta-feira", 5: "Sábado", 6: "Domingo",
+        }
+        week = (
+            df_filtered.dia_semana.map(days).value_counts()
+            .reindex(list(days.values()))
+            .rename_axis("dia").reset_index(name="chamadas")
+        )
+        st.plotly_chart(
+            plot_bar(week, "dia", "chamadas", "Distribuição de Chamadas por Dia da Semana"),
+            width="stretch",
+        )
+
+    # -- Classificação (pizza) + BBM/fração ---------------------------------
     left, right = st.columns(2)
     with left:
         # Pie exclusivo das CLASSIFICAÇÕES (não mistura com situações).
@@ -530,28 +850,61 @@ with tab3:
                 st.plotly_chart(pie_fig, width="stretch")
             else:
                 st.info("Sem classificações preenchidas no recorte.")
+
     with right:
         if unit_column in df_filtered:
-            bbm_counts = counts(df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)), "bbm", "chamadas")
+            bbm_counts = counts(
+                df_filtered.assign(bbm=df_filtered[unit_column].map(extrair_bbm)),
+                "bbm", "chamadas",
+            )
             bbm_counts = bbm_counts[bbm_counts.bbm.ne("Outros")]
-            st.plotly_chart(plot_bar(bbm_counts, "bbm", "chamadas", "Chamadas por Batalhão / Companhia Independente"), width="stretch")
-            fractions = counts(df_filtered.assign(fracao=df_filtered[unit_column].map(extrair_fracao)), "fracao", "chamadas")
+            st.plotly_chart(
+                plot_bar(
+                    bbm_counts, "bbm", "chamadas",
+                    "Chamadas por Batalhão / Companhia Independente",
+                ),
+                width="stretch",
+            )
+
+            fractions = counts(
+                df_filtered.assign(fracao=df_filtered[unit_column].map(extrair_fracao)),
+                "fracao", "chamadas",
+            )
             fractions = fractions[fractions.fracao.ne("Outros")]
-            st.plotly_chart(plot_bar(fractions, "fracao", "chamadas", "Detalhamento por Frações e Unidades Operacionais", 15), width="stretch")
+            st.plotly_chart(
+                plot_bar(
+                    fractions, "fracao", "chamadas",
+                    "Detalhamento por Frações e Unidades Operacionais", 15,
+                ),
+                width="stretch",
+            )
+
 
 # ===========================================================================
 # TAB 4 — Mapa de Ocorrências
+# ---------------------------------------------------------------------------
+# Objetivo: exibir pontos geográficos com três modos (cluster, heatmap,
+# grouped) e controle de amostragem.
 # ===========================================================================
 with tab4:
     st.header("🗺️ Mapa de Ocorrências")
+
     latitude = "Chamada_atendimentos.local_latitude"
     longitude = "Chamada_atendimentos.local_longitude"
+
     if latitude in df_filtered and longitude in df_filtered:
         map_data = df_filtered.dropna(subset=[latitude, longitude])
         if not map_data.empty:
             col_cfg1, col_cfg2 = st.columns([1, 1])
             with col_cfg1:
-                sample_size = st.slider("Tamanho da amostra", min_value=100, max_value=max(100, min(20000, len(map_data))), value=min(5000, len(map_data)), step=100)
+                # Slider de amostragem limita a 20.000 pontos por performance.
+                sample_size = st.slider(
+                    "Tamanho da amostra",
+                    min_value=100,
+                    max_value=max(100, min(20000, len(map_data))),
+                    value=min(5000, len(map_data)),
+                    step=100,
+                )
             with col_cfg2:
                 map_mode = st.radio(
                     "Camada de Visualização",
@@ -563,26 +916,41 @@ with tab4:
                     }[opt],
                     horizontal=True,
                 )
-            map_view, shown = create_occurrence_map(map_data, sample_size, mode_or_group=map_mode)
+
+            map_view, shown = create_occurrence_map(
+                map_data, sample_size, mode_or_group=map_mode
+            )
             st_folium(map_view, width=1200, height=600)
-            st.caption(f"📊 Mostrando {shown:,} de {len(map_data):,} ocorrências com coordenadas válidas.")
+            st.caption(
+                f"📊 Mostrando {shown:,} de {len(map_data):,} ocorrências "
+                "com coordenadas válidas."
+            )
         else:
             st.info("ℹ️ Nenhum dado com coordenadas disponíveis para exibir no mapa.")
     else:
         st.info("ℹ️ Colunas de latitude/longitude não encontradas nos dados.")
 
+
 # ===========================================================================
 # TAB 5 — Tempo de Atendimento
+# ---------------------------------------------------------------------------
+# Objetivo: analisar duração das chamadas, com foco na distinção entre
+# terminal (Classificada) e ativas (tempo decorrido até agora).
 # ===========================================================================
 with tab5:
     st.header("⏱️ Tempo de Atendimento")
+
     terminal_mask = df_filtered["situacao_terminal"].fillna(True).astype(bool)
 
+    # -- Métricas de topo ---------------------------------------------------
     metr_cols = st.columns(4)
     metr_cols[0].metric("📞 Total", f"{len(df_filtered):,}")
     metr_cols[1].metric("✅ Classificadas (encerradas)", f"{int(terminal_mask.sum()):,}")
     metr_cols[2].metric("🟡 Ativas (em andamento)", f"{int((~terminal_mask).sum()):,}")
-    delta_dias = (df_filtered["chamada_data_inclusao"].max() - df_filtered["chamada_data_inclusao"].min()).days + 1
+    delta_dias = (
+        df_filtered["chamada_data_inclusao"].max()
+        - df_filtered["chamada_data_inclusao"].min()
+    ).days + 1
     metr_cols[3].metric("📅 Dias no recorte", f"{delta_dias}")
 
     st.caption(
@@ -592,12 +960,14 @@ with tab5:
         "**decorrido desde a criação até agora**."
     )
 
+    # -- Seleção do modo de análise ----------------------------------------
     modo = st.radio(
         "Analisar:",
         ["Classificadas (tempo real)", "Ativas (tempo decorrido)", "Todas"],
         horizontal=True,
         key="tempo_modo",
     )
+
     if modo.startswith("Classificadas"):
         time_data = df_filtered[terminal_mask].dropna(subset=["data_hora_fim"]).copy()
     elif modo.startswith("Ativas"):
@@ -608,54 +978,89 @@ with tab5:
     if time_data.empty:
         st.info("ℹ️ Nenhum registro disponível para o modo selecionado.")
     else:
+        # -- Filtro de tempo máximo (evita outliers distorcerem) ------------
         max_time_limit = max(720.0, float(np.ceil(time_data.tempo_horas.max())))
-        max_time = st.slider("Filtrar tempo máximo (horas) para análise", 1.0, max_time_limit, max_time_limit, 1.0)
+        max_time = st.slider(
+            "Filtrar tempo máximo (horas) para análise",
+            1.0, max_time_limit, max_time_limit, 1.0,
+        )
         time_data = time_data[time_data.tempo_horas <= max_time].copy()
 
-        average, median, maximum = time_data.tempo_horas.mean(), time_data.tempo_horas.median(), time_data.tempo_horas.max()
+        # -- Métricas de duração -------------------------------------------
+        average = time_data.tempo_horas.mean()
+        median = time_data.tempo_horas.median()
+        maximum = time_data.tempo_horas.max()
         over_day = (time_data.tempo_horas > 24).sum()
+
         metrics = st.columns(5)
         metrics[0].metric("📊 Média", f"{average:.2f} h")
         metrics[1].metric("📊 Mediana", f"{median:.2f} h")
         metrics[2].metric("📈 Máximo", f"{maximum:.2f} h")
         metrics[3].metric("📋 Total de Registros", f"{len(time_data):,}")
-        metrics[4].metric("⏰ Duração > 24h", f"{over_day:,} ({over_day / len(time_data) * 100:.1f}%)")
+        metrics[4].metric(
+            "⏰ Duração > 24h",
+            f"{over_day:,} ({over_day / len(time_data) * 100:.1f}%)",
+        )
         st.divider()
 
+        # -- Histograma geral (com destaque > 24h) --------------------------
         st.subheader("Distribuição do Tempo (em horas)")
-        time_data["categoria"] = np.where(time_data.tempo_horas <= 24, "Até 24h", "Acima de 24h")
+        time_data["categoria"] = np.where(
+            time_data.tempo_horas <= 24, "Até 24h", "Acima de 24h"
+        )
         fig = plot_histogram(
             time_data, "tempo_horas", "Histograma do Tempo",
             color="categoria", nbins=50,
-            labels={"tempo_horas": "Tempo (horas)", "contagem": "Nº de Chamadas", "categoria": "Faixa"},
+            labels={
+                "tempo_horas": "Tempo (horas)",
+                "contagem": "Nº de Chamadas",
+                "categoria": "Faixa",
+            },
             barmode="stack",
         )
         fig.update_layout(legend_title_text="Faixa de Duração")
         st.plotly_chart(fig, width="stretch")
 
-        over_data = time_data[time_data.tempo_horas > 24].assign(dias=lambda data: np.ceil(data.tempo_horas / 24).astype(int))
+        # -- Histograma específico > 24h (em dias) ---------------------------
+        over_data = time_data[time_data.tempo_horas > 24].assign(
+            dias=lambda data: np.ceil(data.tempo_horas / 24).astype(int)
+        )
         if not over_data.empty:
             st.plotly_chart(
                 plot_histogram(
-                    over_data, "dias", "Distribuição dos Atendimentos com Duração > 24h (em dias)",
-                    nbins=20, labels={"dias": "Duração (dias)", "contagem": "Nº de Chamadas"},
+                    over_data, "dias",
+                    "Distribuição dos Atendimentos com Duração > 24h (em dias)",
+                    nbins=20,
+                    labels={"dias": "Duração (dias)", "contagem": "Nº de Chamadas"},
                 ),
                 width="stretch",
             )
 
+        # -- Resumo por classificação / situação ----------------------------
         st.subheader("📋 Resumo por Classificação / Situação da Chamada")
         summary_data = time_data.copy()
+
+        # Preferência: classificação; senão, situação normalizada.
         if class_column:
-            summary_data["classificacao_exibicao"] = summary_data[class_column].astype("string").str.strip()
+            summary_data["classificacao_exibicao"] = (
+                summary_data[class_column].astype("string").str.strip()
+            )
         else:
-            summary_data["classificacao_exibicao"] = pd.Series(pd.NA, index=summary_data.index, dtype="string")
+            summary_data["classificacao_exibicao"] = pd.Series(
+                pd.NA, index=summary_data.index, dtype="string"
+            )
         if "situacao" in summary_data.columns:
             status_labels = summary_data["situacao"].astype("string").str.strip()
             summary_data["classificacao_exibicao"] = summary_data["classificacao_exibicao"].mask(
-                summary_data["classificacao_exibicao"].isna() | summary_data["classificacao_exibicao"].eq(""),
+                summary_data["classificacao_exibicao"].isna()
+                | summary_data["classificacao_exibicao"].eq(""),
                 status_labels,
             )
-        summary_data = summary_data[summary_data["classificacao_exibicao"].notna() & summary_data["classificacao_exibicao"].ne("")]
+        summary_data = summary_data[
+            summary_data["classificacao_exibicao"].notna()
+            & summary_data["classificacao_exibicao"].ne("")
+        ]
+
         if summary_data.empty:
             summary = pd.DataFrame(columns=["classificacao_exibicao", "contagem"])
         else:
@@ -666,18 +1071,35 @@ with tab5:
                 contagem=("tempo_horas", "count"),
                 maximo_horas=("tempo_horas", "max"),
             ).reset_index()
-            summary["acima_24h"] = summary_data["classificacao_exibicao"].where(summary_data.tempo_horas > 24).value_counts().reindex(summary["classificacao_exibicao"]).fillna(0).to_numpy().astype(int)
+            # Contagem de registros com duração > 24h por categoria.
+            summary["acima_24h"] = (
+                summary_data["classificacao_exibicao"]
+                .where(summary_data.tempo_horas > 24).value_counts()
+                .reindex(summary["classificacao_exibicao"]).fillna(0)
+                .to_numpy().astype(int)
+            )
             summary["perc_acima_24h"] = (summary.acima_24h / summary.contagem * 100).round(1)
 
-        minimum = st.number_input("Mínimo de registros por classificação", 1, 100, 5, 1, key="min_reg_class")
-        summary = summary[summary.contagem >= minimum].sort_values("media_horas", ascending=False) if "contagem" in summary and not summary.empty else summary
+        # Filtro de significância mínima por categoria.
+        minimum = st.number_input(
+            "Mínimo de registros por classificação", 1, 100, 5, 1, key="min_reg_class"
+        )
+        summary = (
+            summary[summary.contagem >= minimum].sort_values("media_horas", ascending=False)
+            if "contagem" in summary and not summary.empty
+            else summary
+        )
         if summary.empty:
             st.info(f"Nenhuma classificação com pelo menos {minimum} registros.")
         else:
+            # Formatação para exibição.
             for column in ["media_horas", "mediana_horas", "maximo_horas"]:
                 summary[column] = summary[column].map(lambda value: f"{value:.2f}")
-            summary["desvio_horas"] = summary.desvio_horas.map(lambda value: f"{value:.2f}" if pd.notna(value) else "-")
+            summary["desvio_horas"] = summary.desvio_horas.map(
+                lambda value: f"{value:.2f}" if pd.notna(value) else "-"
+            )
             summary["perc_acima_24h"] = summary.perc_acima_24h.map(lambda value: f"{value:.1f}%")
+
             st.dataframe(
                 summary.rename(columns={
                     "classificacao_exibicao": "Classificação / Situação",
@@ -693,52 +1115,86 @@ with tab5:
                 hide_index=True,
             )
 
+        # -- Boxplot de SLA por situação ------------------------------------
         st.divider()
         st.subheader("⏱️ Tempo por Situação Operacional")
-        fig = plot_tempo_por_situacao(df_filtered if modo == "Todas" else time_data, min_registros=3)
+        fig = plot_tempo_por_situacao(
+            df_filtered if modo == "Todas" else time_data, min_registros=3
+        )
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
         else:
             st.info("Poucas situações distintas para gerar o boxplot.")
 
+
 # ===========================================================================
 # TAB 6 — Operacional (Ativas)
 # ---------------------------------------------------------------------------
-# Foco desta aba: chamadas AINDA EM ANDAMENTO.
+# Objetivo: foco exclusivo nas chamadas AINDA EM ANDAMENTO.
 # Gráficos/tabelas duplicados de outras abas foram removidos:
-#   - Boxplot "Tempo por Situação Operacional" -> já em tab5
-#   - Mapa das chamadas ativas -> já coberto pela tab4 (mesma df_filtered)
+#   - Boxplot "Tempo por Situação Operacional" → já em tab5
+#   - Mapa das chamadas ativas → já coberto pela tab4 (mesma df_filtered)
 # Permanecem: métricas, distribuição por situação operacional, SLA e tabela.
 # ===========================================================================
 with tab6:
     st.header("🚨 Painel Operacional — Chamadas em Andamento")
+
     if "situacao_terminal" not in df_filtered.columns:
         st.info("Estrutura de situação não disponível neste recorte.")
     else:
-        ativas = df_filtered[~df_filtered["situacao_terminal"].fillna(True).astype(bool)].copy()
+        ativas = df_filtered[
+            ~df_filtered["situacao_terminal"].fillna(True).astype(bool)
+        ].copy()
+
         if ativas.empty:
             st.info("✅ Nenhuma chamada em andamento no recorte atual.")
         else:
+            # -- Métricas de topo -------------------------------------------
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("🚨 Em andamento", f"{len(ativas):,}")
-            tmed = ativas["tempo_no_estado_horas"].mean() if "tempo_no_estado_horas" in ativas else np.nan
-            c2.metric("⏱️ Tempo médio decorrido", f"{tmed:.2f} h" if pd.notna(tmed) else "N/D")
-            mode_nat = ativas["Chamada_atendimentos.natureza_descricao"].mode() if "Chamada_atendimentos.natureza_descricao" in ativas else pd.Series(dtype=str)
-            c3.metric("🔥 Natureza dominante", (str(mode_nat.iloc[0])[:38] + "…") if not mode_nat.empty else "N/D")
-            c4.metric("📍 Municípios ativos", ativas["Chamada_atendimentos.local_municipio_nome"].nunique() if "Chamada_atendimentos.local_municipio_nome" in ativas else 0)
+
+            tmed = (
+                ativas["tempo_no_estado_horas"].mean()
+                if "tempo_no_estado_horas" in ativas
+                else np.nan
+            )
+            c2.metric(
+                "⏱️ Tempo médio decorrido",
+                f"{tmed:.2f} h" if pd.notna(tmed) else "N/D",
+            )
+
+            mode_nat = (
+                ativas["Chamada_atendimentos.natureza_descricao"].mode()
+                if "Chamada_atendimentos.natureza_descricao" in ativas
+                else pd.Series(dtype=str)
+            )
+            c3.metric(
+                "🔥 Natureza dominante",
+                (str(mode_nat.iloc[0])[:38] + "…") if not mode_nat.empty else "N/D",
+            )
+
+            c4.metric(
+                "📍 Municípios ativos",
+                ativas["Chamada_atendimentos.local_municipio_nome"].nunique()
+                if "Chamada_atendimentos.local_municipio_nome" in ativas
+                else 0,
+            )
 
             st.divider()
+
+            # -- Distribuição por situação operacional ----------------------
             st.subheader("📊 Distribuição por Situação Operacional")
             fig = plot_situacao_operacional(ativas)
             if fig is not None:
                 st.plotly_chart(fig, width="stretch")
                 st.caption(
-                    "Cada fatia representa uma situação operacional distinta de **Classificada** — "
-                    "chamadas ainda pendentes na tela do despachante."
+                    "Cada fatia representa uma situação operacional distinta de "
+                    "**Classificada** — chamadas ainda pendentes na tela do despachante."
                 )
             else:
                 st.info("Sem situações operacionais para exibir.")
 
+            # -- SLA: faixas de tempo decorrido -----------------------------
             st.subheader("⏱️ SLA de Chamadas em Aberto")
             if "tempo_no_estado_horas" in ativas:
                 faixas = pd.cut(
@@ -757,11 +1213,13 @@ with tab6:
                     color="chamadas", color_continuous_scale="OrRd",
                 )
                 fig_sla.update_layout(
-                    xaxis_title="Faixa de tempo", yaxis_title="Nº de Chamadas",
+                    xaxis_title="Faixa de tempo",
+                    yaxis_title="Nº de Chamadas",
                     coloraxis_showscale=False,
                 )
                 st.plotly_chart(_apply_theme_layout(fig_sla), width="stretch")
 
+            # -- Tabela detalhada das chamadas ativas ----------------------
             st.subheader("📋 Chamadas em Andamento")
             colunas_visiveis = [
                 "chamada_numero",
@@ -778,12 +1236,17 @@ with tab6:
                 tabela = tabela.sort_values("tempo_no_estado_horas", ascending=False)
             st.dataframe(tabela, width="stretch", hide_index=True)
 
+
 # ===========================================================================
 # TAB 7 — Flags, Agências e Natureza
+# ---------------------------------------------------------------------------
+# Objetivo: reunir sinalizações operacionais (Alerta, Destaque, Autoridade),
+# origem do REDS, natureza por grupo temático e prioridade.
 # ===========================================================================
 with tab7:
     st.header("🏷️ Flags Operacionais, Agências e Categorias de Natureza")
 
+    # -- Sinalizações operacionais (overview + temporal) --------------------
     st.subheader("🚩 Sinalizações Operacionais")
     fig = plot_flags_overview(df_filtered)
     if fig is not None:
@@ -793,24 +1256,38 @@ with tab7:
 
     left, right = st.columns(2)
     with left:
-        meses_distintos = df_filtered["chamada_data_inclusao"].dt.to_period("M").nunique() if "chamada_data_inclusao" in df_filtered else 0
+        # Frequência do resample: mensal quando há mais de 2 meses distintos,
+        # diário caso contrário (evita séries muito curtas).
+        meses_distintos = (
+            df_filtered["chamada_data_inclusao"].dt.to_period("M").nunique()
+            if "chamada_data_inclusao" in df_filtered
+            else 0
+        )
         freq = "MS" if meses_distintos > 2 else "D"
         fig = plot_flags_temporal(df_filtered, freq=freq)
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
     with right:
+        # Municípios com mais chamadas marcadas como "Alerta".
         if "alerta_flag" in df_filtered.columns and "Chamada_atendimentos.local_municipio_nome" in df_filtered.columns:
             top_alerta = (
                 df_filtered[df_filtered["alerta_flag"].fillna(False)]
                 ["Chamada_atendimentos.local_municipio_nome"]
-                .value_counts().head(10).rename_axis("municipio").reset_index(name="chamadas")
+                .value_counts().head(10)
+                .rename_axis("municipio").reset_index(name="chamadas")
             )
             if not top_alerta.empty:
-                st.plotly_chart(plot_bar(top_alerta, "municipio", "chamadas", "Top 10 Municípios com Alerta"), width="stretch")
+                st.plotly_chart(
+                    plot_bar(top_alerta, "municipio", "chamadas",
+                             "Top 10 Municípios com Alerta"),
+                    width="stretch",
+                )
             else:
                 st.info("Nenhuma chamada marcada com Alerta no recorte.")
 
     st.divider()
+
+    # -- REDS / Agências soliciantes ---------------------------------------
     st.subheader("🏢 Origem do REDS / Agências Solicitantes")
     left, right = st.columns(2)
     with left:
@@ -823,6 +1300,8 @@ with tab7:
             c1, c2 = st.columns(2)
             c1.metric("🤝 Multiagência (PM+BM)", int(multi.sum()))
             c2.metric("% do total", f"{multi.mean()*100:.1f}%")
+
+            # Grupos temáticos com mais chamadas multiagência.
             if "natureza_grupo" in df_filtered.columns and multi.any():
                 cross = (
                     df_filtered[multi]
@@ -831,9 +1310,15 @@ with tab7:
                     .rename_axis("grupo").reset_index(name="chamadas")
                 )
                 if not cross.empty:
-                    st.plotly_chart(plot_bar(cross, "grupo", "chamadas", "Grupos com Mais Chamadas Multiagência"), width="stretch")
+                    st.plotly_chart(
+                        plot_bar(cross, "grupo", "chamadas",
+                                 "Grupos com Mais Chamadas Multiagência"),
+                        width="stretch",
+                    )
 
     st.divider()
+
+    # -- Natureza por grupo e prioridade -----------------------------------
     st.subheader("🧭 Natureza por Grupo Temático e Prioridade")
     left, right = st.columns(2)
     with left:
@@ -845,6 +1330,7 @@ with tab7:
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
 
+    # Pivot Natureza × Prioridade (contagem de chamadas).
     if {"natureza_grupo", "natureza_prioridade"}.issubset(df_filtered.columns):
         pivot = pd.pivot_table(
             df_filtered,
@@ -857,5 +1343,12 @@ with tab7:
         st.subheader("📊 Natureza × Prioridade (contagem de chamadas)")
         st.dataframe(pivot, width="stretch")
 
+
+# ===========================================================================
+# RODAPÉ
+# ===========================================================================
 st.markdown("---")
-st.caption("Dashboard desenvolvido com Streamlit | Corpo de Bombeiros Militar de Minas Gerais - COBOM-BH")
+st.caption(
+    "Dashboard desenvolvido com Streamlit | "
+    "Corpo de Bombeiros Militar de Minas Gerais - COBOM-BH"
+)

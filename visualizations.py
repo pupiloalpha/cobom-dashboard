@@ -1,4 +1,20 @@
-"""Gráficos e mapa padronizados do dashboard adaptados aos temas claro e escuro."""
+"""
+Gráficos e mapas padronizados do dashboard COBOM-BH.
+
+Este módulo encapsula TODAS as visualizações Plotly e Folium usadas no
+``app.py``. Cada função recebe DataFrames já enriquecidos (saída de
+``data_loader.process_dataframe``) e retorna objetos de figura prontos
+para ``st.plotly_chart`` / ``st_folium``.
+
+Convenções:
+    - Fundo transparente em todos os gráficos (``_apply_theme_layout``),
+      para integração automática com modo claro/escuro do Streamlit.
+    - Rótulos em português brasileiro via ``DEFAULT_PT_LABELS``.
+    - Funções retornam ``None`` quando não há dados suficientes — o
+      chamador deve tratar exibindo mensagem informativa.
+"""
+
+from __future__ import annotations
 
 import folium
 import numpy as np
@@ -10,7 +26,14 @@ from plotly.subplots import make_subplots
 
 from utils.helpers import safe_map_text
 
-DEFAULT_PT_LABELS = {
+
+# ---------------------------------------------------------------------------
+# RÓTULOS PADRÃO (PT-BR)
+# ---------------------------------------------------------------------------
+# Mapeia nomes técnicos de colunas → rótulos amigáveis exibidos nos eixos,
+# legendas e tooltips. Sobrescrevível por chamada via argumento ``labels``.
+# ---------------------------------------------------------------------------
+DEFAULT_PT_LABELS: dict[str, str] = {
     "count": "Nº de Chamadas",
     "contagem": "Nº de Chamadas",
     "chamadas": "Nº de Chamadas",
@@ -35,8 +58,18 @@ DEFAULT_PT_LABELS = {
 }
 
 
+# ===========================================================================
+# HELPERS INTERNOS
+# ===========================================================================
 def _apply_theme_layout(fig):
-    """Garante fundo transparente e integração visual com modo claro/escuro."""
+    """Aplica fundo transparente e margens consistentes a uma figura Plotly.
+
+    Args:
+        fig: Figura Plotly (Express ou Graph Objects).
+
+    Returns:
+        A mesma figura com layout ajustado.
+    """
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -45,61 +78,97 @@ def _apply_theme_layout(fig):
     return fig
 
 
+# ===========================================================================
+# GRÁFICOS GENÉRICOS (barras, linhas, histogramas)
+# ===========================================================================
 def plot_bar(df, x, y, title, top_n=None, labels=None):
+    """Gráfico de barras verticais com suporte a Top-N.
+
+    Args:
+        df: DataFrame com os dados.
+        x: Coluna para o eixo X (categorias).
+        y: Coluna para o eixo Y (valores).
+        title: Título do gráfico.
+        top_n: Limita ao Top-N registros (aplicado antes do plot).
+        labels: Sobrescreve rótulos em ``DEFAULT_PT_LABELS``.
+
+    Returns:
+        Figura Plotly Express.
+    """
     data = df.head(top_n) if top_n else df
     combined_labels = {**DEFAULT_PT_LABELS, **(labels or {}), x: "", y: "Nº de Chamadas"}
-    fig = px.bar(
-        data,
-        x=x,
-        y=y,
-        title=title,
-        labels=combined_labels,
-    )
-    fig.update_layout(
-        xaxis_title="",
-        yaxis_title="Nº de Chamadas",
-    )
+    fig = px.bar(data, x=x, y=y, title=title, labels=combined_labels)
+    fig.update_layout(xaxis_title="", yaxis_title="Nº de Chamadas")
     return _apply_theme_layout(fig)
 
 
 def plot_line(df, x, y, color, title, labels=None):
+    """Gráfico de linhas com coloração opcional por coluna.
+
+    Args:
+        df: DataFrame com os dados.
+        x: Coluna do eixo X (temporal ou ordinal).
+        y: Coluna do eixo Y (valores).
+        color: Coluna de agrupamento/coloração (``None`` para linha única).
+        title: Título.
+        labels: Sobrescreve rótulos.
+
+    Returns:
+        Figura Plotly Express.
+    """
     combined_labels = {**DEFAULT_PT_LABELS, **(labels or {})}
-    fig = px.line(
-        df,
-        x=x,
-        y=y,
-        color=color,
-        title=title,
-        labels=combined_labels,
-    )
+    fig = px.line(df, x=x, y=y, color=color, title=title, labels=combined_labels)
     return _apply_theme_layout(fig)
 
 
 def plot_histogram(df, x, title, labels=None, **kwargs):
+    """Histograma com kwargs repassados ao Plotly Express.
+
+    Args:
+        df: DataFrame com os dados.
+        x: Coluna a histogramar.
+        title: Título.
+        labels: Sobrescreve rótulos.
+        **kwargs: Repassados a ``px.histogram`` (ex.: ``nbins``, ``color``,
+            ``barmode``).
+
+    Returns:
+        Figura Plotly Express.
+    """
     combined_labels = {**DEFAULT_PT_LABELS, **(labels or {})}
-    fig = px.histogram(
-        df,
-        x=x,
-        title=title,
-        labels=combined_labels,
-        **kwargs,
-    )
-    fig.update_layout(
-        yaxis_title="Nº de Chamadas",
-    )
+    fig = px.histogram(df, x=x, title=title, labels=combined_labels, **kwargs)
+    fig.update_layout(yaxis_title="Nº de Chamadas")
     return _apply_theme_layout(fig)
 
 
+# ===========================================================================
+# GRÁFICOS ESPECÍFICOS DO DOMÍNIO
+# ===========================================================================
 def plot_resource_concentration(df: pd.DataFrame, top_n: int = 30):
-    """Exibe os chamados com mais recursos e a concentração acumulada."""
+    """Exibe os chamados com mais recursos e a concentração acumulada (Pareto).
+
+    Combina:
+        - Barras: quantidade de recursos por chamada (ordenadas desc).
+        - Linha (eixo secundário): percentual acumulado de recursos.
+
+    Args:
+        df: DataFrame enriquecido.
+        top_n: Número de chamadas a exibir (Top-N).
+
+    Returns:
+        Figura Plotly ou ``None`` se colunas essenciais faltarem.
+    """
     call_column = "chamada_numero"
     resource_column = "Empenhos.recurso_codigo_prefixo"
     if call_column not in df.columns or resource_column not in df.columns:
         return None
 
+    # Universo de chamadas (deduplicado).
     calls = df[[call_column]].copy()
     calls[call_column] = calls[call_column].astype("string").str.strip()
     calls = calls[calls[call_column].notna() & calls[call_column].ne("")].drop_duplicates()
+
+    # Explode recursos multi-valor em linhas individuais.
     resources = df[[call_column, resource_column]].copy()
     resources[call_column] = resources[call_column].astype("string").str.strip()
     resources[resource_column] = (
@@ -108,6 +177,7 @@ def plot_resource_concentration(df: pd.DataFrame, top_n: int = 30):
     resources = resources.assign(recurso=resources[resource_column].str.split(",")).explode("recurso")
     resources["recurso"] = resources["recurso"].astype("string").str.strip()
     resources = resources[resources["recurso"].notna() & resources["recurso"].ne("")]
+
     counts = resources.groupby(call_column).size().rename("recursos").reset_index()
     counts = calls.merge(counts, on=call_column, how="left").fillna({"recursos": 0})
     counts = counts.sort_values(["recursos", call_column], ascending=[False, True]).reset_index(drop=True)
@@ -120,6 +190,8 @@ def plot_resource_concentration(df: pd.DataFrame, top_n: int = 30):
         counts["recursos"].cumsum().div(total_resources).mul(100) if total_resources else 0
     )
     visible = counts.head(top_n)
+
+    # Barras + linha em eixos duplos.
     figure = make_subplots(specs=[[{"secondary_y": True}]])
     figure.add_trace(
         go.Bar(
@@ -155,7 +227,14 @@ def plot_resource_concentration(df: pd.DataFrame, top_n: int = 30):
 
 
 def plot_hourly_weekday_heatmap(df: pd.DataFrame):
-    """Gera matriz de calor 2D (24h x 7 dias) para planejamento de plantão operacional."""
+    """Gera matriz de calor 2D (24h × 7 dias) para planejamento operacional.
+
+    Args:
+        df: DataFrame enriquecido (deve conter ``hora`` e ``dia_semana``).
+
+    Returns:
+        Figura Plotly com heatmap, ou ``None`` se dados insuficientes.
+    """
     if "hora" not in df.columns or "dia_semana" not in df.columns:
         return None
 
@@ -166,9 +245,13 @@ def plot_hourly_weekday_heatmap(df: pd.DataFrame):
     valid["hora"] = valid["hora"].astype(int)
     valid["dia_semana"] = valid["dia_semana"].astype(int)
 
-    day_names = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"]
+    day_names = [
+        "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira",
+        "Sexta-feira", "Sábado", "Domingo",
+    ]
     hours = list(range(24))
 
+    # Pivot: linhas = dias, colunas = horas.
     pivot = (
         valid.groupby(["dia_semana", "hora"])
         .size()
@@ -177,8 +260,11 @@ def plot_hourly_weekday_heatmap(df: pd.DataFrame):
     )
 
     total_calls = pivot.values.sum()
-    pct_matrix = (pivot.values / total_calls * 100) if total_calls > 0 else np.zeros_like(pivot.values)
+    pct_matrix = (
+        (pivot.values / total_calls * 100) if total_calls > 0 else np.zeros_like(pivot.values)
+    )
 
+    # Texto customizado de hover com contagem absoluta + percentual.
     hover_text = [
         [
             f"<b>{day_names[d]} às {h:02d}:00</b><br>"
@@ -213,7 +299,14 @@ def plot_hourly_weekday_heatmap(df: pd.DataFrame):
 
 
 def plot_situacao_operacional(df: pd.DataFrame):
-    """Distribuição das situações operacionais (útil para ativas)."""
+    """Distribuição das situações operacionais (rosca). Útil para ativas.
+
+    Args:
+        df: DataFrame enriquecido (deve conter ``situacao_norm``).
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "situacao_norm" not in df.columns:
         return None
     base = (
@@ -232,7 +325,14 @@ def plot_situacao_operacional(df: pd.DataFrame):
 
 
 def plot_flags_overview(df: pd.DataFrame):
-    """Comparativo das três flags operacionais (Alerta, Destaque, Autoridade)."""
+    """Comparativo das três flags operacionais (Alerta, Destaque, Autoridade).
+
+    Args:
+        df: DataFrame enriquecido com ``*_flag``.
+
+    Returns:
+        Figura Plotly ou ``None`` se nenhuma flag existir.
+    """
     registros = []
     for col, rotulo in (
         ("alerta_flag", "Alerta"),
@@ -257,7 +357,15 @@ def plot_flags_overview(df: pd.DataFrame):
 
 
 def plot_flags_temporal(df: pd.DataFrame, freq: str = "MS"):
-    """Evolução temporal das flags ativas (Alerta, Destaque, Autoridade)."""
+    """Evolução temporal das flags ativas (resample mensal ou diário).
+
+    Args:
+        df: DataFrame enriquecido.
+        freq: Frequência do ``resample`` Pandas (``"MS"`` mensal, ``"D"`` diário).
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "chamada_data_inclusao" not in df.columns:
         return None
     flags = [c for c in ("alerta_flag", "destaque_flag", "envolve_autoridade_flag") if c in df.columns]
@@ -280,7 +388,14 @@ def plot_flags_temporal(df: pd.DataFrame, freq: str = "MS"):
 
 
 def plot_natureza_grupos(df: pd.DataFrame):
-    """Ranking por grupo temático da natureza (APH, incêndio, salvamento...)."""
+    """Ranking por grupo temático da natureza (APH, incêndio, salvamento...).
+
+    Args:
+        df: DataFrame enriquecido com ``natureza_grupo``.
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "natureza_grupo" not in df.columns:
         return None
     base = (
@@ -303,7 +418,14 @@ def plot_natureza_grupos(df: pd.DataFrame):
 
 
 def plot_prioridade(df: pd.DataFrame):
-    """Distribuição por prioridade da natureza (1, 2, 3)."""
+    """Distribuição por prioridade da natureza (1, 2, 3).
+
+    Args:
+        df: DataFrame enriquecido com ``natureza_prioridade``.
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "natureza_prioridade" not in df.columns:
         return None
     base = (
@@ -329,7 +451,14 @@ def plot_prioridade(df: pd.DataFrame):
 
 
 def plot_reds_origem(df: pd.DataFrame):
-    """Distribuição por origem do REDS (PM, BM, multiagência)."""
+    """Distribuição por origem do REDS (PM, BM, multiagência).
+
+    Args:
+        df: DataFrame enriquecido com ``reds_origem``.
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "reds_origem" not in df.columns:
         return None
     base = (
@@ -347,7 +476,15 @@ def plot_reds_origem(df: pd.DataFrame):
 
 
 def plot_tempo_por_situacao(df: pd.DataFrame, min_registros: int = 3):
-    """Boxplot do tempo decorrido por situação (SLA por estado operacional)."""
+    """Boxplot do tempo decorrido por situação (SLA por estado operacional).
+
+    Args:
+        df: DataFrame enriquecido com ``situacao_norm`` e ``tempo_no_estado_horas``.
+        min_registros: Mínimo de registros por situação para entrar no plot.
+
+    Returns:
+        Figura Plotly ou ``None`` se dados insuficientes.
+    """
     if "situacao_norm" not in df.columns or "tempo_no_estado_horas" not in df.columns:
         return None
     validos = df.dropna(subset=["situacao_norm", "tempo_no_estado_horas"]).copy()
@@ -366,18 +503,50 @@ def plot_tempo_por_situacao(df: pd.DataFrame, min_registros: int = 3):
     return _apply_theme_layout(fig)
 
 
+# ===========================================================================
+# MAPA FOLIUM
+# ===========================================================================
 def create_occurrence_map(
     map_df: pd.DataFrame,
     sample_size: int,
     mode_or_group: str | bool = "cluster",
 ):
-    """Cria visualização de mapa em Folium com suporte a Clusters, Municípios e Heatmap (KDE)."""
+    """Cria mapa Folium com três modos de camada.
+
+    Modos suportados:
+        - ``"cluster"``: ``MarkerCluster`` com popup por ocorrência.
+        - ``"heatmap"``: mancha de calor via ``HeatMap`` (KDE espacial).
+        - ``"grouped"``: ``CircleMarker`` por município, com raio proporcional
+          ao número de ocorrências.
+
+    Compatibilidade retroativa: aceitar ``bool`` (``True`` → ``"grouped"``,
+    ``False`` → ``"cluster"``).
+
+    Args:
+        map_df: DataFrame com coordenadas válidas.
+        sample_size: Número de pontos a exibir (amostragem aleatória).
+        mode_or_group: Modo (str) ou bool legado.
+
+    Returns:
+        Tupla ``(folium.Map, n_pontos_exibidos)``.
+    """
     latitude = "Chamada_atendimentos.local_latitude"
     longitude = "Chamada_atendimentos.local_longitude"
-    center = [float(map_df[latitude].mean()), float(map_df[longitude].mean())]
-    selected = map_df.sample(sample_size, random_state=42) if len(map_df) > sample_size else map_df
-    map_view = folium.Map(location=center, zoom_start=10, tiles="OpenStreetMap", control_scale=True)
 
+    # Centro do mapa pela média das coordenadas válidas.
+    center = [float(map_df[latitude].mean()), float(map_df[longitude].mean())]
+
+    # Amostragem determinística para estabilidade visual.
+    selected = (
+        map_df.sample(sample_size, random_state=42)
+        if len(map_df) > sample_size
+        else map_df
+    )
+    map_view = folium.Map(
+        location=center, zoom_start=10, tiles="OpenStreetMap", control_scale=True
+    )
+
+    # Compatibilidade com assinatura antiga (bool).
     if isinstance(mode_or_group, bool):
         mode = "grouped" if mode_or_group else "cluster"
     else:
@@ -393,26 +562,40 @@ def create_occurrence_map(
             max_zoom=14,
             gradient={0.2: "blue", 0.4: "cyan", 0.6: "lime", 0.8: "yellow", 1.0: "red"},
         ).add_to(map_view)
+
     elif mode == "grouped":
-        grouped = selected.dropna(subset=["Chamada_atendimentos.local_municipio_nome"]).groupby(
-            "Chamada_atendimentos.local_municipio_nome", as_index=False
-        ).agg(latitude=(latitude, "mean"), longitude=(longitude, "mean"), ocorrencias=(latitude, "size"))
+        # Agrega por município; raio ~ sqrt(ocorrências).
+        grouped = (
+            selected.dropna(subset=["Chamada_atendimentos.local_municipio_nome"])
+            .groupby("Chamada_atendimentos.local_municipio_nome", as_index=False)
+            .agg(latitude=(latitude, "mean"), longitude=(longitude, "mean"),
+                 ocorrencias=(latitude, "size"))
+        )
         for _, row in grouped.iterrows():
             folium.CircleMarker(
                 location=[row["latitude"], row["longitude"]],
                 radius=max(6, min(35, row["ocorrencias"] ** 0.5 * 2.5)),
-                popup=f"<b>{row['Chamada_atendimentos.local_municipio_nome']}</b><br>Ocorrências: {row['ocorrencias']:,}",
+                popup=(
+                    f"<b>{row['Chamada_atendimentos.local_municipio_nome']}</b>"
+                    f"<br>Ocorrências: {row['ocorrencias']:,}"
+                ),
                 color="#d62728",
                 fill=True,
                 fill_opacity=0.65,
             ).add_to(map_view)
+
     else:
+        # Cluster padrão: um marcador por ocorrência.
         cluster = MarkerCluster().add_to(map_view)
         for _, row in selected.iterrows():
             municipality = safe_map_text(row.get("Chamada_atendimentos.local_municipio_nome"), "N/D")
             nature = safe_map_text(row.get("Chamada_atendimentos.natureza_descricao"), "N/D")
             local = safe_map_text(row.get("Chamada_atendimentos.local_do_fato"), "N/D")
-            popup = f"<b>📍 Município:</b> {municipality}<br><b>🔥 Natureza:</b> {nature}<br><b>🏠 Local:</b> {local}"
+            popup = (
+                f"<b>📍 Município:</b> {municipality}<br>"
+                f"<b>🔥 Natureza:</b> {nature}<br>"
+                f"<b>🏠 Local:</b> {local}"
+            )
             folium.Marker(
                 location=[row[latitude], row[longitude]],
                 popup=folium.Popup(popup, max_width=300),
