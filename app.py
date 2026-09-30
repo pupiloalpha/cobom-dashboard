@@ -192,6 +192,17 @@ def searchable_multiselect(
         label_visibility="collapsed",
     )
 
+    def _make_filters_key(filters_dict: dict) -> tuple:
+    """Converte o dicionário de filtros em chave hashable e ordenada.
+
+    Espelha ``data_loader._filters_key`` mas evita importar função privada —
+    e é usada apenas como chave de cache de sessão, não para `st.cache_data`.
+    """
+    return tuple(
+        (key, tuple(value) if isinstance(value, list) else value)
+        for key, value in sorted(filters_dict.items())
+    )
+
 # ===========================================================================
 # ESTADO DA SESSÃO
 # ===========================================================================
@@ -230,10 +241,15 @@ with st.sidebar:
     # Sem uploads → oferece botão de demo (entrar ou sair).
     if not uploaded_files:
         if st.session_state["use_demo_data"]:
-            if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
+                        if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
                 st.session_state["use_demo_data"] = False
                 st.session_state["cached_dataframes"] = {}
                 st.session_state["cached_file_signatures"] = {}
+                # Invalida os três níveis de cache de sessão.
+                for key in ("_combined", "_combined_sig",
+                            "_source", "_source_sig",
+                            "_df_filtered", "_csv_bytes", "_filter_sig"):
+                    st.session_state.pop(key, None)
                 st.rerun()
             st.info("ℹ️ Exibindo conjunto de **Dados de Demonstração (Demo CBMMG)**.")
         else:
@@ -363,22 +379,42 @@ with st.sidebar:
                     except Exception as error:
                         st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
 
-    # Concatena todos os DataFrames carregados (arquivo + tipo_arquivo).
+        # Concatena todos os DataFrames carregados (arquivo + tipo_arquivo).
     dataframes = st.session_state.get("cached_dataframes", {})
     if not dataframes:
         st.error("Nenhum arquivo pôde ser carregado.")
         st.stop()
 
-    combined = pd.concat(
-        [
-            dataframe.assign(
-                arquivo=name,
-                tipo_arquivo=detect_file_type(dataframe, name),
-            )
-            for name, dataframe in dataframes.items()
-        ],
-        ignore_index=True,
+    # -----------------------------------------------------------------------
+    # Cache de sessão — nível 1: ``combined``
+    # -----------------------------------------------------------------------
+    # ``combined`` é reconstruído por ``pd.concat`` a cada rerun, o que custa
+    # caro em bases grandes. A assinatura abaixo só muda quando:
+    #   - um arquivo é adicionado/removido, ou
+    #   - o conteúdo de um arquivo muda (SHA-256 diferente).
+    # Enquanto isso não acontece, reaproveitamos o objeto já montado.
+    combined_signature = tuple(
+        sorted(
+            (name, st.session_state["cached_file_signatures"].get(name, ""))
+            for name in dataframes
+        )
     )
+
+    if st.session_state.get("_combined_sig") == combined_signature:
+        combined = st.session_state["_combined"]
+    else:
+        combined = pd.concat(
+            [
+                dataframe.assign(
+                    arquivo=name,
+                    tipo_arquivo=detect_file_type(dataframe, name),
+                )
+                for name, dataframe in dataframes.items()
+            ],
+            ignore_index=True,
+        )
+        st.session_state["_combined"] = combined
+        st.session_state["_combined_sig"] = combined_signature
 
     if not st.session_state.get("use_demo_data"):
         st.success(f"✅ {len(dataframes)} arquivo(s) carregado(s) com sucesso!")
@@ -433,21 +469,40 @@ with st.sidebar:
         ["Todos", *dataframes],
     )
 
-    if selected_file == "Todos":
-        source = combined.copy()
+    # -----------------------------------------------------------------------
+    # Cache de sessão — nível 2: ``source``
+    # -----------------------------------------------------------------------
+    # A assinatura cobre TODAS as entradas que definem o recorte atual.
+    source_signature = (
+        combined_signature,
+        selected_file,
+        tuple(sorted(tipos_selecionados)),
+        data_inicio.isoformat(),
+        data_fim.isoformat(),
+    )
+
+    if st.session_state.get("_source_sig") == source_signature:
+        source = st.session_state["_source"]
     else:
-        source = dataframes[selected_file].copy()
-        if "tipo_arquivo" not in source.columns:
-            source["tipo_arquivo"] = detect_file_type(source, selected_file)
+        if selected_file == "Todos":
+            source = combined.copy()
+        else:
+            source = dataframes[selected_file].copy()
+            if "tipo_arquivo" not in source.columns:
+                source["tipo_arquivo"] = detect_file_type(source, selected_file)
 
-    # Aplica tipo de arquivo e intervalo de datas.
-    if tipos_selecionados and "tipo_arquivo" in source.columns:
-        source = source[source["tipo_arquivo"].isin(tipos_selecionados)]
-        if source.empty:
-            st.warning("⚠️ Nenhum dado disponível para os tipos de arquivo selecionados.")
-            st.stop()
+        # Aplica tipo de arquivo e intervalo de datas.
+        if tipos_selecionados and "tipo_arquivo" in source.columns:
+            source = source[source["tipo_arquivo"].isin(tipos_selecionados)]
+            if source.empty:
+                st.warning("⚠️ Nenhum dado disponível para os tipos de arquivo selecionados.")
+                st.stop()
 
-    source = source[source["chamada_data_inclusao"].dt.date.between(data_inicio, data_fim)]
+        source = source[
+            source["chamada_data_inclusao"].dt.date.between(data_inicio, data_fim)
+        ]
+        st.session_state["_source"] = source
+        st.session_state["_source_sig"] = source_signature
 
     # Nomes canônicos das colunas usadas nos filtros.
     municipality_column = "Chamada_atendimentos.local_municipio_nome"
@@ -461,7 +516,7 @@ with st.sidebar:
         "classificacao",
     )
 
-        # Filtros em cascata: cada seleção restringe as opções do próximo.
+    # Filtros em cascata: cada seleção restringe as opções do próximo.
     #
     # Cada filtro usa ``searchable_multiselect`` — que substitui o fuzzy
     # matching nativo do ``st.multiselect`` (fuzzysort) por substring
@@ -528,7 +583,7 @@ with st.sidebar:
             "Recursos Empenhados", available_resources, key="flt_recurso"
         )
 
-    # Monta o dicionário de filtros e aplica (com cache).
+        # Monta o dicionário de filtros e aplica (com cache).
     filter_dict = {
         municipality_column: municipality_filter,
         nature_column: nature_filter,
@@ -538,10 +593,27 @@ with st.sidebar:
     if class_column:
         filter_dict[class_column] = class_filter
 
-    df_filtered = apply_filters(source, filter_dict)
+    # -----------------------------------------------------------------------
+    # Cache de sessão — nível 3: ``df_filtered`` + bytes do CSV
+    # -----------------------------------------------------------------------
+    # Evita (a) re-hash do DataFrame dentro de ``apply_filters`` (que usa
+    # ``@st.cache_data`` em ``data_loader``) e (b) re-serialização do CSV
+    # pelo ``st.download_button`` a cada rerun. Ambos pesam em bases grandes.
+    filter_signature = (source_signature, _make_filters_key(filter_dict))
+
+    if st.session_state.get("_filter_sig") == filter_signature:
+        df_filtered = st.session_state["_df_filtered"]
+        csv_bytes = st.session_state["_csv_bytes"]
+    else:
+        df_filtered = apply_filters(source, filter_dict)
+        csv_bytes = df_filtered.to_csv(index=False).encode("utf-8-sig")
+        st.session_state["_df_filtered"] = df_filtered
+        st.session_state["_csv_bytes"] = csv_bytes
+        st.session_state["_filter_sig"] = filter_signature
+
     st.download_button(
         "⬇️ Baixar dados filtrados (CSV)",
-        data=df_filtered.to_csv(index=False).encode("utf-8-sig"),
+        data=csv_bytes,
         file_name="cobom_dados_filtrados.csv",
         mime="text/csv",
     )
