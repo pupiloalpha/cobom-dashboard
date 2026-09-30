@@ -382,12 +382,18 @@ with st.sidebar:
 
         available_natures = sorted(cascade_scope[nature_column].dropna().unique()) if nature_column in cascade_scope else []
         nature_filter = st.multiselect("Natureza", available_natures)
+        if nature_filter and nature_column in cascade_scope:
+            cascade_scope = cascade_scope[cascade_scope[nature_column].isin(nature_filter)]
 
         available_classes = sorted(cascade_scope[class_column].dropna().unique()) if class_column else []
         class_filter = st.multiselect("Classificação da Chamada", available_classes)
+        if class_filter and class_column:
+            cascade_scope = cascade_scope[cascade_scope[class_column].isin(class_filter)]
 
         available_units = sorted(cascade_scope[unit_column].dropna().unique()) if unit_column in cascade_scope else []
         unit_filter = st.multiselect("Unidade", available_units)
+        if unit_filter and unit_column in cascade_scope:
+            cascade_scope = cascade_scope[cascade_scope[unit_column].isin(unit_filter)]
 
         available_resources = extrair_recursos(cascade_scope)
         resource_filter = st.multiselect("Recursos Empenhados", available_resources)
