@@ -74,6 +74,22 @@ st.markdown("""
     .stMetric { font-size: 0.9rem !important; }
     .stMetric label { font-size: 0.9rem !important; }
     .stMetric .stMetricValue { font-size: 1.4rem !important; }
+
+    /* Integra o campo de busca ao multiselect abaixo (dentro da sidebar).
+       A busca é pré-filtrada no servidor via ``searchable_multiselect``;
+       o CSS só remove o "gap" visual entre os dois widgets para que o
+       usuário perceba um único controle. */
+    [data-testid="stSidebar"] div[data-testid="stTextInput"] {
+        margin-bottom: -1.05rem;
+    }
+    [data-testid="stSidebar"] div[data-testid="stTextInput"] input {
+        border-bottom-left-radius: 0 !important;
+        border-bottom-right-radius: 0 !important;
+    }
+    [data-testid="stSidebar"] div[data-testid="stMultiSelect"] > div > div {
+        border-top-left-radius: 0 !important;
+        border-top-right-radius: 0 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,7 +127,9 @@ def _strip_accents(text: str) -> str:
 
 
 def _matches_query(option: str, query: str) -> bool:
-    """Verifica se ``query`` está contido em ``option`` ignorando caixa e acentos."""
+    """Substring estrita (case- e accent-insensitive) — substitui o fuzzy
+    nativo do ``st.multiselect``, que retorna itens que contêm os caracteres
+    em sequência mas não necessariamente o texto digitado como substring."""
     if not query:
         return True
     return _strip_accents(query).casefold() in _strip_accents(str(option)).casefold()
@@ -121,45 +139,58 @@ def searchable_multiselect(
     label: str,
     options: list,
     key: str,
-    placeholder: str = "Digite parte do texto para filtrar as opções...",
+    placeholder: str = "🔎 Digite para filtrar as opções...",
 ) -> list:
-    """``st.multiselect`` com campo de busca explícito e accent-insensitive.
+    """``st.multiselect`` com busca estrita por substring.
 
-    Por que não usar apenas o ``st.multiselect``:
+    Por que este helper existe:
 
-        - A busca nativa do Streamlit é *case-insensitive* mas sensível a
-          acentos e, em algumas versões, faz *fuzzy match* — o que faz
-          opções **sem o texto digitado** aparecerem no dropdown.
-        - Os itens já selecionados continuam visíveis como "chips", mesmo
-          quando a busca esconde outros itens, o que confunde o usuário.
+        O ``st.multiselect`` nativo usa ``fuzzysort`` no frontend, que faz
+        *subsequence matching* — digitar "inc" pode devolver itens como
+        "V12345 ATENDIMENTO PRÉ-HOSPITALAR Prioridade: 2" se as letras
+        i→n→c aparecerem em ordem no meio do texto. Isso é o que faz
+        "naturezas não compatíveis" aparecerem na lista.
 
-    Este helper resolve os dois problemas:
+        Como o Streamlit não expõe o termo digitado no multiselect para o
+        backend, pré-filtramos as opções com um ``st.text_input`` colocado
+        VISUALMENTE logo acima do widget (via CSS, sem gap e com cantos
+        alinhados). O usuário vê um único controle; o backend recebe o
+        termo digitado e aplica substring estrita.
 
-        1. Renderiza um ``st.text_input`` acima do widget. Apenas as opções
-           que contêm o texto digitado (ignorando caixa e acentos) são
-           oferecidas no dropdown.
-        2. Preserva as opções já selecionadas na lista — evitando que a
-           busca desfaça seleções existentes de forma silenciosa.
+    Preserva ainda as seleções anteriores mesmo quando o termo digitado
+    não casa com elas, para não desfazer escolhas silenciosamente.
+
+    Args:
+        label: Rótulo exibido acima do conjunto.
+        options: Lista completa de opções disponíveis no recorte atual.
+        key: Chave única do widget (usada também para o campo de busca).
+        placeholder: Texto de ajuda no campo de busca.
+
+    Returns:
+        Lista de opções selecionadas.
     """
     query = st.text_input(
-        f"🔎 Buscar em «{label}»",
-        key=f"{key}__search",
+        label,
+        key=f"{key}__query",
         placeholder=placeholder,
     )
 
-    previous = list(st.session_state.get(key, []) or [])
-    previous_in_options = [opt for opt in previous if opt in options]
-
     if query.strip():
-        matching = [opt for opt in options if _matches_query(opt, query)]
-        # Mantém seleções anteriores visíveis para não desfazê-las.
-        extras = [opt for opt in previous_in_options if opt not in matching]
-        filtered = [*extras, *matching]
+        filtered = [opt for opt in options if _matches_query(opt, query)]
     else:
         filtered = list(options)
 
-    return st.multiselect(label, options=filtered, key=key)
+    # Mantém seleções anteriores visíveis mesmo se não casarem com a busca,
+    # evitando que o usuário perca escolhas ao refinar o filtro.
+    previous = list(st.session_state.get(key, []) or [])
+    extras = [opt for opt in previous if opt in options and opt not in filtered]
 
+    return st.multiselect(
+        label,
+        options=[*extras, *filtered],
+        key=key,
+        label_visibility="collapsed",
+    )
 
 # ===========================================================================
 # ESTADO DA SESSÃO
@@ -430,13 +461,12 @@ with st.sidebar:
         "classificacao",
     )
 
-    # Filtros em cascata: cada seleção restringe as opções do próximo.
+        # Filtros em cascata: cada seleção restringe as opções do próximo.
     #
-    # Cada filtro usa ``searchable_multiselect`` — que combina um campo de
-    # texto (busca accent- e case-insensitive, aplicada às OPÇÕES) com o
-    # ``st.multiselect``. Isso evita que a busca nativa do Streamlit devolva
-    # opções que não contêm o texto digitado e garante que a lista de matches
-    # vista pelo usuário seja exatamente a lista de opções selecionáveis.
+    # Cada filtro usa ``searchable_multiselect`` — que substitui o fuzzy
+    # matching nativo do ``st.multiselect`` (fuzzysort) por substring
+    # estrita, case- e accent-insensitive. Visualmente continua sendo um
+    # único controle: o campo de busca fica encostado no multiselect.
     with st.expander("Filtros adicionais (em cascata)", expanded=True):
         all_municipalities = (
             sorted(source[municipality_column].dropna().unique())
@@ -470,7 +500,8 @@ with st.sidebar:
         )
         class_filter = (
             searchable_multiselect(
-                "Classificação da Chamada", available_classes,
+                "Classificação da Chamada",
+                available_classes,
                 key="flt_classificacao",
             )
             if class_column else []
