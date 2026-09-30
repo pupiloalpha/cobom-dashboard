@@ -25,6 +25,7 @@ Dependências internas:
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -100,6 +101,64 @@ def counts(dataframe: pd.DataFrame, column: str, name: str = "contagem") -> pd.D
     if column not in dataframe.columns:
         return pd.DataFrame(columns=[column, name])
     return dataframe[column].dropna().value_counts().rename_axis(column).reset_index(name=name)
+
+def _strip_accents(text: str) -> str:
+    """Remove acentos/diacríticos para permitir busca accent-insensitive."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(text))
+        if not unicodedata.combining(ch)
+    )
+
+
+def _matches_query(option: str, query: str) -> bool:
+    """Verifica se ``query`` está contido em ``option`` ignorando caixa e acentos."""
+    if not query:
+        return True
+    return _strip_accents(query).casefold() in _strip_accents(str(option)).casefold()
+
+
+def searchable_multiselect(
+    label: str,
+    options: list,
+    key: str,
+    placeholder: str = "Digite parte do texto para filtrar as opções...",
+) -> list:
+    """``st.multiselect`` com campo de busca explícito e accent-insensitive.
+
+    Por que não usar apenas o ``st.multiselect``:
+
+        - A busca nativa do Streamlit é *case-insensitive* mas sensível a
+          acentos e, em algumas versões, faz *fuzzy match* — o que faz
+          opções **sem o texto digitado** aparecerem no dropdown.
+        - Os itens já selecionados continuam visíveis como "chips", mesmo
+          quando a busca esconde outros itens, o que confunde o usuário.
+
+    Este helper resolve os dois problemas:
+
+        1. Renderiza um ``st.text_input`` acima do widget. Apenas as opções
+           que contêm o texto digitado (ignorando caixa e acentos) são
+           oferecidas no dropdown.
+        2. Preserva as opções já selecionadas na lista — evitando que a
+           busca desfaça seleções existentes de forma silenciosa.
+    """
+    query = st.text_input(
+        f"🔎 Buscar em «{label}»",
+        key=f"{key}__search",
+        placeholder=placeholder,
+    )
+
+    previous = list(st.session_state.get(key, []) or [])
+    previous_in_options = [opt for opt in previous if opt in options]
+
+    if query.strip():
+        matching = [opt for opt in options if _matches_query(opt, query)]
+        # Mantém seleções anteriores visíveis para não desfazê-las.
+        extras = [opt for opt in previous_in_options if opt not in matching]
+        filtered = [*extras, *matching]
+    else:
+        filtered = list(options)
+
+    return st.multiselect(label, options=filtered, key=key)
 
 
 # ===========================================================================
@@ -372,31 +431,71 @@ with st.sidebar:
     )
 
     # Filtros em cascata: cada seleção restringe as opções do próximo.
+    #
+    # Cada filtro usa ``searchable_multiselect`` — que combina um campo de
+    # texto (busca accent- e case-insensitive, aplicada às OPÇÕES) com o
+    # ``st.multiselect``. Isso evita que a busca nativa do Streamlit devolva
+    # opções que não contêm o texto digitado e garante que a lista de matches
+    # vista pelo usuário seja exatamente a lista de opções selecionáveis.
     with st.expander("Filtros adicionais (em cascata)", expanded=True):
-        all_municipalities = sorted(source[municipality_column].dropna().unique()) if municipality_column in source else []
-        municipality_filter = st.multiselect("Município", all_municipalities)
+        all_municipalities = (
+            sorted(source[municipality_column].dropna().unique())
+            if municipality_column in source else []
+        )
+        municipality_filter = searchable_multiselect(
+            "Município", all_municipalities, key="flt_municipio"
+        )
 
         cascade_scope = source
         if municipality_filter and municipality_column in cascade_scope:
-            cascade_scope = cascade_scope[cascade_scope[municipality_column].isin(municipality_filter)]
+            cascade_scope = cascade_scope[
+                cascade_scope[municipality_column].isin(municipality_filter)
+            ]
 
-        available_natures = sorted(cascade_scope[nature_column].dropna().unique()) if nature_column in cascade_scope else []
-        nature_filter = st.multiselect("Natureza", available_natures)
+        available_natures = (
+            sorted(cascade_scope[nature_column].dropna().unique())
+            if nature_column in cascade_scope else []
+        )
+        nature_filter = searchable_multiselect(
+            "Natureza", available_natures, key="flt_natureza"
+        )
         if nature_filter and nature_column in cascade_scope:
-            cascade_scope = cascade_scope[cascade_scope[nature_column].isin(nature_filter)]
+            cascade_scope = cascade_scope[
+                cascade_scope[nature_column].isin(nature_filter)
+            ]
 
-        available_classes = sorted(cascade_scope[class_column].dropna().unique()) if class_column else []
-        class_filter = st.multiselect("Classificação da Chamada", available_classes)
+        available_classes = (
+            sorted(cascade_scope[class_column].dropna().unique())
+            if class_column else []
+        )
+        class_filter = (
+            searchable_multiselect(
+                "Classificação da Chamada", available_classes,
+                key="flt_classificacao",
+            )
+            if class_column else []
+        )
         if class_filter and class_column:
-            cascade_scope = cascade_scope[cascade_scope[class_column].isin(class_filter)]
+            cascade_scope = cascade_scope[
+                cascade_scope[class_column].isin(class_filter)
+            ]
 
-        available_units = sorted(cascade_scope[unit_column].dropna().unique()) if unit_column in cascade_scope else []
-        unit_filter = st.multiselect("Unidade", available_units)
+        available_units = (
+            sorted(cascade_scope[unit_column].dropna().unique())
+            if unit_column in cascade_scope else []
+        )
+        unit_filter = searchable_multiselect(
+            "Unidade", available_units, key="flt_unidade"
+        )
         if unit_filter and unit_column in cascade_scope:
-            cascade_scope = cascade_scope[cascade_scope[unit_column].isin(unit_filter)]
+            cascade_scope = cascade_scope[
+                cascade_scope[unit_column].isin(unit_filter)
+            ]
 
         available_resources = extrair_recursos(cascade_scope)
-        resource_filter = st.multiselect("Recursos Empenhados", available_resources)
+        resource_filter = searchable_multiselect(
+            "Recursos Empenhados", available_resources, key="flt_recurso"
+        )
 
     # Monta o dicionário de filtros e aplica (com cache).
     filter_dict = {
