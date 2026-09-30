@@ -118,6 +118,7 @@ def counts(dataframe: pd.DataFrame, column: str, name: str = "contagem") -> pd.D
         return pd.DataFrame(columns=[column, name])
     return dataframe[column].dropna().value_counts().rename_axis(column).reset_index(name=name)
 
+
 def _strip_accents(text: str) -> str:
     """Remove acentos/diacríticos para permitir busca accent-insensitive."""
     return "".join(
@@ -192,7 +193,8 @@ def searchable_multiselect(
         label_visibility="collapsed",
     )
 
-    def _make_filters_key(filters_dict: dict) -> tuple:
+
+def _make_filters_key(filters_dict: dict) -> tuple:
     """Converte o dicionário de filtros em chave hashable e ordenada.
 
     Espelha ``data_loader._filters_key`` mas evita importar função privada —
@@ -202,6 +204,7 @@ def searchable_multiselect(
         (key, tuple(value) if isinstance(value, list) else value)
         for key, value in sorted(filters_dict.items())
     )
+
 
 # ===========================================================================
 # ESTADO DA SESSÃO
@@ -241,7 +244,7 @@ with st.sidebar:
     # Sem uploads → oferece botão de demo (entrar ou sair).
     if not uploaded_files:
         if st.session_state["use_demo_data"]:
-                        if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
+            if st.button("🔄 Sair dos dados de demonstração", use_container_width=True):
                 st.session_state["use_demo_data"] = False
                 st.session_state["cached_dataframes"] = {}
                 st.session_state["cached_file_signatures"] = {}
@@ -379,7 +382,7 @@ with st.sidebar:
                     except Exception as error:
                         st.error(f"Erro ao carregar {uploaded_file.name}: {error}")
 
-        # Concatena todos os DataFrames carregados (arquivo + tipo_arquivo).
+    # Concatena todos os DataFrames carregados (arquivo + tipo_arquivo).
     dataframes = st.session_state.get("cached_dataframes", {})
     if not dataframes:
         st.error("Nenhum arquivo pôde ser carregado.")
@@ -583,7 +586,7 @@ with st.sidebar:
             "Recursos Empenhados", available_resources, key="flt_recurso"
         )
 
-        # Monta o dicionário de filtros e aplica (com cache).
+    # Monta o dicionário de filtros e aplica (com cache).
     filter_dict = {
         municipality_column: municipality_filter,
         nature_column: nature_filter,
