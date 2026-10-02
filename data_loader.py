@@ -727,6 +727,40 @@ def _enrich_reds(result: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+# >>> CORREÇÃO -----------------------------------------------------------------
+# Helper dedicado à extração do município a partir de `local_do_fato`.
+# Aceita os separadores usados pelos exports do CAD (" - ", " – ", " — ", " / ")
+# e devolve pd.NA quando não há um candidato plausível. Usado apenas como
+# FALLBACK — o valor já preenchido no arquivo tem prioridade absoluta.
+# ------------------------------------------------------------------------------
+def _extract_municipio_from_local(local: Any) -> str | Any:
+    """Extrai o município de ``local_do_fato`` (formato ``LOGRADOURO - MUNICÍPIO``).
+
+    Retorna ``pd.NA`` quando o texto está vazio, é nulo ou não contém um
+    separador reconhecido. Nunca levanta exceção.
+    """
+    if local is None:
+        return pd.NA
+    try:
+        if pd.isna(local):
+            return pd.NA
+    except (TypeError, ValueError):
+        pass
+
+    text = str(local).replace("\xa0", " ").strip()
+    if not text:
+        return pd.NA
+
+    for sep in (" - ", " – ", " — ", " / "):
+        if sep in text:
+            candidate = text.split(sep)[-1].strip()
+            if candidate:
+                return candidate
+    # Sem separador explícito, não inventamos: devolve NA para não contaminar
+    # a coluna com logradouros inteiros (bug original).
+    return pd.NA
+
+
 # ===========================================================================
 # PIPELINE PRINCIPAL
 # ===========================================================================
@@ -736,7 +770,8 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     Ordem das etapas:
         1. Parse de ``data_hora_criacao`` e derivação de data/hora/ano/mês.
         2. Normalização de coordenadas (lat/lon).
-        3. Extração do município a partir de ``local_do_fato``.
+        3. Município: PRESERVA o valor do arquivo (XLSX) e só deriva de
+           ``local_do_fato`` como fallback (linhas vazias ou arquivos CSV).
         4. Cálculo de ``data_hora_fim``:
               - se situação terminal → usa ``data_hora_situacao_atual``;
               - caso contrário → usa ``now()`` (chamada ativa).
@@ -751,8 +786,7 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
 
     # >>> CORREÇÃO: aplica aliases locais (ex.: ESTADO_CHAMADA → situacao) ANTES
-    # de qualquer etapa do pipeline. Cobre arquivos XLSX que não passaram pelo
-    # normalize_column_names por já terem colunas canônicas parciais.
+    # de qualquer etapa do pipeline.
     result = _apply_local_aliases(result)
 
     # -- Etapa 1: data/hora de criação e derivações temporais ----------------
@@ -773,11 +807,45 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             result[column] = _numeric_coordinates(result[column], max_abs)
 
     # -- Etapa 3: município --------------------------------------------------
+    # Regra de negócio:
+    #   - XLSX: o export já traz `Chamada_atendimentos.local_municipio_nome`
+    #     preenchido — PRESERVAMOS o valor do arquivo.
+    #   - CSV: o export NÃO traz essa coluna — derivamos de `local_do_fato`.
+    #   - Em ambos os casos, linhas com município vazio recebem a derivação
+    #     como fallback, sem sobrescrever valores válidos.
     local_column = "Chamada_atendimentos.local_do_fato"
-    if local_column in result.columns:
-        result["Chamada_atendimentos.local_municipio_nome"] = result[local_column].map(
-            lambda value: value if pd.isna(value) else str(value).split(" - ")[-1].strip()
+    municipio_column = "Chamada_atendimentos.local_municipio_nome"
+
+    # Normaliza o município existente (strip + NBSP → espaço + nulos → NA).
+    if municipio_column in result.columns:
+        existing_municipio = (
+            result[municipio_column]
+            .astype("string")
+            .str.replace("\xa0", " ", regex=False)
+            .str.strip()
         )
+        # Trata strings vazias como ausentes para permitir o fallback.
+        existing_municipio = existing_municipio.where(
+            existing_municipio.notna() & existing_municipio.ne("")
+        )
+    else:
+        existing_municipio = pd.Series(pd.NA, index=result.index, dtype="string")
+
+    # Deriva do logradouro apenas quando necessário (CSV ou lacunas do XLSX).
+    derived_municipio = pd.Series(pd.NA, index=result.index, dtype="string")
+    if local_column in result.columns:
+        derived_municipio = (
+            result[local_column]
+            .map(_extract_municipio_from_local)
+            .astype("string")
+        )
+        derived_municipio = derived_municipio.where(
+            derived_municipio.notna() & derived_municipio.ne("")
+        )
+
+    # Combina: prioridade absoluta ao valor do arquivo; derivação só preenche
+    # as lacunas restantes.
+    result[municipio_column] = existing_municipio.fillna(derived_municipio)
 
     # -- Etapa 4: componentes temporais adicionais ---------------------------
     if "chamada_data_inclusao" in result.columns:
@@ -785,7 +853,9 @@ def process_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         result["ano"] = result["chamada_data_inclusao"].dt.year
         result["mes"] = result["chamada_data_inclusao"].dt.month
         result["mes_ano"] = result["chamada_data_inclusao"].dt.to_period("M").astype(str)
-        result["hora"] = (result["chamada_hora_inclusao"].dt.total_seconds() // 3600).astype("Int64")
+        result["hora"] = (
+            result["chamada_hora_inclusao"].dt.total_seconds() // 3600
+        ).astype("Int64")
         result["dia_semana"] = result["chamada_data_inclusao"].dt.dayofweek
 
     # -- Etapa 5: data_hora_fim (terminal vs. agora) -------------------------
